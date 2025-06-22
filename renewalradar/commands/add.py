@@ -23,6 +23,12 @@ class AddCommand(Command):
     name = 'add'
     description = 'Add a new subscription'
 
+    # List of supported currency codes
+    SUPPORTED_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'CHF', 'INR', 'CNY', 'HKD']
+
+    # Valid billing cycles
+    VALID_BILLING_CYCLES = ['monthly', 'yearly']
+
     @classmethod
     def register_arguments(cls, parser):
         """Register command-specific arguments."""
@@ -35,21 +41,21 @@ class AddCommand(Command):
         parser.add_argument(
             '--cost',
             required=True,
-            type=float,
-            help='Cost of the subscription'
+            type=str,  # Changed to str to handle custom validation
+            help='Cost of the subscription (must be a positive number)'
         )
 
         parser.add_argument(
             '--billing-cycle',
             required=True,
-            choices=['monthly', 'yearly'],
-            help='Billing cycle (monthly or yearly)'
+            choices=cls.VALID_BILLING_CYCLES,
+            help=f'Billing cycle ({" or ".join(cls.VALID_BILLING_CYCLES)})'
         )
 
         parser.add_argument(
             '--currency',
             required=True,
-            help='Currency code (e.g., USD, EUR, GBP)'
+            help=f'Currency code ({", ".join(cls.SUPPORTED_CURRENCIES)})'
         )
 
         parser.add_argument(
@@ -74,43 +80,139 @@ class AddCommand(Command):
             help='Additional notes about the subscription'
         )
 
-    def execute(self, args):
-        """Execute the add command."""
+    def _validate_cost(self, cost_str):
+        """
+        Validate that cost is a positive number.
+
+        Args:
+            cost_str (str): Cost as a string
+
+        Returns:
+            float: Parsed cost value
+
+        Raises:
+            ValueError: If cost is invalid
+        """
         try:
-            # Validate dates
-            if not validate_date_format(args.start_date):
-                print(f"Error: Invalid start date format. Use YYYY-MM-DD format.")
-                return 1
+            cost = float(cost_str)
+            if cost <= 0:
+                raise ValueError("Cost must be a positive number")
+            return cost
+        except ValueError:
+            raise ValueError(f"Invalid cost: '{cost_str}'. Cost must be a positive number.")
 
-            if args.renewal_date and not validate_date_format(args.renewal_date):
-                print(f"Error: Invalid renewal date format. Use YYYY-MM-DD format.")
-                return 1
+    def _validate_currency(self, currency):
+        """
+        Validate that currency is supported.
 
-            # Create subscription object
+        Args:
+            currency (str): Currency code
+
+        Raises:
+            ValueError: If currency is not supported
+        """
+        if currency.upper() not in self.SUPPORTED_CURRENCIES:
+            raise ValueError(
+                f"Unsupported currency: '{currency}'. "
+                f"Supported currencies are: {', '.join(self.SUPPORTED_CURRENCIES)}"
+            )
+        return currency.upper()  # Normalize to uppercase
+
+    def _validate_dates(self, start_date, renewal_date=None):
+        """
+        Validate start_date and optional renewal_date.
+
+        Args:
+            start_date (str): Start date as string
+            renewal_date (str, optional): Renewal date as string
+
+        Returns:
+            tuple: (start_date, renewal_date) as strings
+
+        Raises:
+            ValueError: If dates are invalid or renewal_date is before start_date
+        """
+        # Validate start_date format
+        if not validate_date_format(start_date):
+            raise ValueError(
+                f"Invalid start date format: '{start_date}'. Use YYYY-MM-DD format."
+            )
+
+        # If renewal_date is provided, validate it
+        if renewal_date:
+            if not validate_date_format(renewal_date):
+                raise ValueError(
+                    f"Invalid renewal date format: '{renewal_date}'. Use YYYY-MM-DD format."
+                )
+
+            # Check that renewal_date is not earlier than start_date
+            start_date_obj = parse_date(start_date)
+            renewal_date_obj = parse_date(renewal_date)
+
+            if renewal_date_obj < start_date_obj:
+                raise ValueError(
+                    f"Renewal date ({renewal_date}) cannot be earlier than start date ({start_date})."
+                )
+
+        return start_date, renewal_date
+
+    def execute(self, args):
+        """
+        Execute the add command with enhanced validation.
+
+        Args:
+            args: Command line arguments
+
+        Returns:
+            int: Exit code (0 for success, 1 for errors)
+        """
+        try:
+            # Validate all input fields
+            cost = self._validate_cost(args.cost)
+            currency = self._validate_currency(args.currency)
+            start_date, renewal_date = self._validate_dates(args.start_date, args.renewal_date)
+
+            # Validate name is not empty
+            if not args.name.strip():
+                raise ValueError("Name cannot be empty")
+
+            # Create subscription object with validated data
             subscription = Subscription(
-                name=args.name,
-                cost=args.cost,
+                name=args.name.strip(),
+                cost=cost,
                 billing_cycle=args.billing_cycle,
-                currency=args.currency,
-                start_date=args.start_date,
-                renewal_date=args.renewal_date,
-                payment_method=args.payment_method,
-                notes=args.notes
+                currency=currency,
+                start_date=start_date,
+                renewal_date=renewal_date,
+                payment_method=args.payment_method.strip() if args.payment_method else '',
+                notes=args.notes.strip() if args.notes else None
             )
 
             # Save to database
             db_manager = DatabaseManager()
             try:
                 subscription_id = db_manager.add_subscription(subscription.to_dict())
-                print(f"Subscription '{args.name}' added successfully (ID: {subscription_id}).")
-                print(f"Next renewal: {subscription.renewal_date} ({subscription.days_until_renewal()} days from now)")
+
+                # Display success feedback
+                print(f"\nSubscription '{args.name}' added successfully (ID: {subscription_id}).")
+                print(f"Details:")
+                print(f"  Cost: {cost:.2f} {currency} ({args.billing_cycle})")
+                print(f"  Start Date: {start_date}")
+                print(f"  Renewal Date: {subscription.renewal_date}")
+                print(f"  Days until renewal: {subscription.days_until_renewal()}")
+
+                if args.billing_cycle == 'monthly':
+                    print(f"  Annual cost: {subscription.calculate_annual_cost():.2f} {currency}")
+
                 return 0
             finally:
                 db_manager.close()
 
         except ValueError as e:
+            # Display clear error message for validation errors
             print(f"Error: {e}")
             return 1
         except Exception as e:
+            # Catch-all for unexpected errors
             print(f"An unexpected error occurred: {e}")
             return 1
