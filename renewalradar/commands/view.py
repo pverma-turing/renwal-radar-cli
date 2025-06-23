@@ -28,6 +28,7 @@ class ViewCommand(Command):
         'DUE_SOON': Fore.YELLOW,
         'NORMAL': Fore.WHITE,
         'HEADER': Fore.CYAN + Style.BRIGHT,
+        'NOTES': Fore.GREEN,
         'RESET': Style.RESET_ALL,
     }
 
@@ -124,6 +125,10 @@ class ViewCommand(Command):
             # Add parsed dates for easier handling
             enhanced_sub["start_date_obj"] = parse_date(sub["start_date"]).date()
             enhanced_sub["renewal_date_obj"] = parse_date(sub["renewal_date"]).date()
+
+            # Ensure notes is a string (even if None)
+            if enhanced_sub["notes"] is None:
+                enhanced_sub["notes"] = ""
 
             enhanced.append(enhanced_sub)
 
@@ -234,7 +239,8 @@ class ViewCommand(Command):
             "start_date": 10,
             "renewal_date": 10,
             "payment": 8,
-            "days": 5
+            "days": 5,
+            "notes": 10  # Added minimum width for notes
         }
 
         # Calculate max content lengths
@@ -246,7 +252,8 @@ class ViewCommand(Command):
             "start_date": min_widths["start_date"],  # Fixed width for dates
             "renewal_date": min_widths["renewal_date"],  # Fixed width for dates
             "payment": max(min_widths["payment"], max([len(s["payment_method"] or "N/A") for s in subscriptions])),
-            "days": min_widths["days"]  # Fixed width for days
+            "days": min_widths["days"],  # Fixed width for days
+            "notes": max(min_widths["notes"], min(30, max([len(s["notes"]) for s in subscriptions])))  # Cap at 30 chars
         }
 
         # Calculate total width needed
@@ -264,7 +271,8 @@ class ViewCommand(Command):
                 "currency": 4,
                 "start_date": 5,
                 "renewal_date": 5,
-                "days": 6
+                "days": 6,
+                "notes": 1  # Notes can be shrunk first
             }
 
             # Sort columns by priority
@@ -305,7 +313,8 @@ class ViewCommand(Command):
             f"{'START':<{widths['start_date']}} "
             f"{'RENEWAL':<{widths['renewal_date']}} "
             f"{'PAYMENT':<{widths['payment']}} "
-            f"{'DAYS':<{widths['days']}}{self.COLORS['RESET']}"
+            f"{'DAYS':<{widths['days']}} "
+            f"{'NOTES':<{widths['notes']}}{self.COLORS['RESET']}"
         )
         print("\n" + header)
         print("-" * len(header.replace(self.COLORS['HEADER'], '').replace(self.COLORS['RESET'], '')))
@@ -325,6 +334,7 @@ class ViewCommand(Command):
             # Format each field with truncation if needed
             name = self._truncate_text(sub['name'], widths['name'])
             payment = self._truncate_text(sub['payment_method'] or 'N/A', widths['payment'])
+            notes = self._truncate_text(sub['notes'] or '-', widths['notes'])
 
             # Print the formatted row with color
             row = (
@@ -335,9 +345,20 @@ class ViewCommand(Command):
                 f"{sub['start_date']:<{widths['start_date']}} "
                 f"{sub['renewal_date']:<{widths['renewal_date']}} "
                 f"{payment:<{widths['payment']}} "
-                f"{days_str:<{widths['days']}}{self.COLORS['RESET']}"
+                f"{days_str:<{widths['days']}} "
+                f"{self.COLORS['NOTES']}{notes}{self.COLORS['RESET']}"
             )
             print(row)
+
+    def _display_subscription_details(self, subscription):
+        """
+        Display detailed view of a single subscription including full notes.
+
+        Args:
+            subscription (dict): Subscription dictionary
+        """
+        # TODO: Future implementation for viewing full details of a subscription
+        pass
 
     def _display_summary(self, subscriptions, status='all'):
         """
@@ -374,6 +395,9 @@ class ViewCommand(Command):
         overdue_count = sum(1 for sub in subscriptions if sub["days_until_renewal"] < 0)
         due_soon_count = sum(1 for sub in subscriptions if 0 <= sub["days_until_renewal"] <= self.DUE_SOON_THRESHOLD)
 
+        # Count subscriptions with notes
+        with_notes_count = sum(1 for sub in subscriptions if sub["notes"])
+
         # Print summary
         status_desc = {'all': 'All subscriptions', 'upcoming': 'Upcoming renewals', 'overdue': 'Overdue subscriptions'}
 
@@ -385,6 +409,9 @@ class ViewCommand(Command):
             print(f"{self.COLORS['OVERDUE']}Overdue: {overdue_count}{self.COLORS['RESET']}")
             print(
                 f"{self.COLORS['DUE_SOON']}Due within {self.DUE_SOON_THRESHOLD} days: {due_soon_count}{self.COLORS['RESET']}")
+
+        # Show count of subscriptions with notes
+        print(f"{self.COLORS['NOTES']}With notes: {with_notes_count}{self.COLORS['RESET']}")
 
         # Show cost total by currency
         print("\nMonthly costs:")

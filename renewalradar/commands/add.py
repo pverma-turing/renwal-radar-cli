@@ -77,7 +77,8 @@ class AddCommand(Command):
 
         parser.add_argument(
             '--notes',
-            help='Additional notes about the subscription'
+            default=None,
+            help='Additional notes or comments about the subscription (free text)'
         )
 
     def _validate_cost(self, cost_str):
@@ -156,6 +157,28 @@ class AddCommand(Command):
 
         return start_date, renewal_date
 
+    def _validate_notes(self, notes):
+        """
+        Process and validate notes.
+
+        Args:
+            notes (str): User provided notes
+
+        Returns:
+            str or None: Processed notes
+        """
+        if notes is None:
+            return None
+
+        # Trim whitespace but preserve content
+        notes = notes.strip()
+
+        # Return None if empty string after trimming
+        if not notes:
+            return None
+
+        return notes
+
     def execute(self, args):
         """
         Execute the add command with enhanced validation.
@@ -171,6 +194,7 @@ class AddCommand(Command):
             cost = self._validate_cost(args.cost)
             currency = self._validate_currency(args.currency)
             start_date, renewal_date = self._validate_dates(args.start_date, args.renewal_date)
+            notes = self._validate_notes(args.notes)
 
             # Validate name is not empty
             if not args.name.strip():
@@ -185,7 +209,7 @@ class AddCommand(Command):
                 start_date=start_date,
                 renewal_date=renewal_date,
                 payment_method=args.payment_method.strip() if args.payment_method else '',
-                notes=args.notes.strip() if args.notes else None
+                notes=notes
             )
 
             # Save to database
@@ -203,6 +227,10 @@ class AddCommand(Command):
 
                 if args.billing_cycle == 'monthly':
                     print(f"  Annual cost: {subscription.calculate_annual_cost():.2f} {currency}")
+
+                # Display notes if provided
+                if notes:
+                    print(f"  Notes: {notes}")
 
                 return 0
             finally:
