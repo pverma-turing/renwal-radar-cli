@@ -31,14 +31,16 @@ class ViewCommand(Command):
         'HEADER': Fore.CYAN + Style.BRIGHT,
         'NOTES': Fore.GREEN,
         'PARENT': Fore.MAGENTA,
+        'TREE_LINE': Fore.BLUE,
         'RESET': Style.RESET_ALL,
     }
 
     # Days thresholds for highlighting
     DUE_SOON_THRESHOLD = 7  # Days
 
-    # Symbol for indentation
-    INDENT_SYMBOL = "  ↳ "
+    # Symbols for tree display
+    INDENT_SYMBOL = "  ↳ "  # For tabular view
+    TREE_BRANCH = "↳ "  # For dependency tree view
 
     # Sample exchange rates (base: USD)
     # Format: {'CURRENCY_CODE': rate_against_USD}
@@ -62,7 +64,7 @@ class ViewCommand(Command):
         parser.add_argument(
             '--sort',
             choices=['name', 'cost', 'renewal_date', 'billing_cycle', 'days', 'trial_end_date', 'parent'],
-            help='Sort subscriptions by the specified field'
+            help='Sort subscriptions by the specified field (ignored when using --show-dependency-tree)'
         )
 
         parser.add_argument(
@@ -79,10 +81,19 @@ class ViewCommand(Command):
             help=f'Convert and display costs in the specified currency'
         )
 
-        parser.add_argument(
+        # Display format options - make these mutually exclusive
+        display_group = parser.add_mutually_exclusive_group()
+
+        display_group.add_argument(
             '--flat',
             action='store_true',
             help='Display subscriptions in a flat list (no parent-child indentation)'
+        )
+
+        display_group.add_argument(
+            '--show-dependency-tree',
+            action='store_true',
+            help='Display subscriptions as a parent-child dependency tree'
         )
 
     def execute(self, args):
@@ -113,21 +124,29 @@ class ViewCommand(Command):
                     print(status_message + ".")
                     return 0
 
-                # Apply sorting (if specified)
-                sorted_subscriptions = self._sort_subscriptions(filtered_subscriptions, args.sort,
-                                                                target_currency=args.currency)
-
-                # Organize subscriptions into hierarchy for display
-                if args.flat:
-                    display_subscriptions = sorted_subscriptions
+                # Choose display format based on flags
+                if args.show_dependency_tree:
+                    # Build and display dependency tree
+                    self._display_dependency_tree(filtered_subscriptions, target_currency=args.currency)
                 else:
-                    display_subscriptions = self._organize_hierarchical_display(sorted_subscriptions)
+                    # Use regular tabular display
+                    # Apply sorting (if specified)
+                    sorted_subscriptions = self._sort_subscriptions(
+                        filtered_subscriptions, args.sort, target_currency=args.currency
+                    )
 
-                # Display the subscriptions in a nicely formatted table
-                self._display_subscriptions(display_subscriptions, target_currency=args.currency, flat_view=args.flat)
+                    # Organize subscriptions into hierarchy for display
+                    if args.flat:
+                        display_subscriptions = sorted_subscriptions
+                    else:
+                        display_subscriptions = self._organize_hierarchical_display(sorted_subscriptions)
+
+                    # Display the subscriptions in a nicely formatted table
+                    self._display_subscriptions(display_subscriptions, target_currency=args.currency,
+                                                flat_view=args.flat)
 
                 # Display summary information
-                self._display_summary(sorted_subscriptions, status=args.status, target_currency=args.currency)
+                self._display_summary(filtered_subscriptions, status=args.status, target_currency=args.currency)
                 return 0
             finally:
                 db_manager.close()
@@ -170,6 +189,46 @@ class ViewCommand(Command):
                 parent['children'].append(sub['id'])
 
         return subscriptions
+
+    def _build_tree_structure(self, subscriptions):
+        """
+        Build a hierarchical tree structure for dependency tree display.
+
+        Args:
+            subscriptions (list): List of enhanced subscription dictionaries
+
+        Returns:
+            dict: Tree structure with parent IDs as keys and lists of child subscriptions as values
+            list: List of root subscriptions (no parent)
+        """
+        # Create a map of subscription ID to subscription
+        sub_map = {sub['id']: sub for sub in subscriptions}
+
+        # Create a tree structure where keys are parent IDs and values are lists of child subscriptions
+        tree = {}
+        # Find root subscriptions (those with no parent)
+        roots = []
+
+        for sub in subscriptions:
+            parent_id = sub.get('parent_subscription_id')
+
+            if parent_id is None:
+                # This is a root subscription
+                roots.append(sub)
+            else:
+                # This is a child subscription
+                if parent_id not in tree:
+                    tree[parent_id] = []
+                tree[parent_id].append(sub)
+
+        # Sort roots alphabetically by name
+        roots.sort(key=lambda s: s['name'].lower())
+
+        # Sort children in each branch alphabetically
+        for parent_id in tree:
+            tree[parent_id].sort(key=lambda s: s['name'].lower())
+
+        return tree, roots
 
     def _convert_currency(self, amount, from_currency, to_currency):
         """
@@ -402,6 +461,120 @@ class ViewCommand(Command):
         display_list.extend(remaining)
 
         return display_list
+
+    def _display_dependency_tree(self, subscriptions, target_currency=None):
+        """
+        Display subscriptions as a parent-child dependency tree.
+
+        Args:
+            subscriptions (list): List of enhanced subscription dictionaries
+            target_currency (str, optional): Currency to display costs in
+        """
+        if not subscriptions:
+            return
+
+        # Build tree structure
+        tree, roots = self._build_tree_structure(subscriptions)
+
+        # Create a map of subscription ID to subscription
+        sub_map = {sub['id']: sub for sub in subscriptions}
+
+        # Print message regarding currency conversion if applicable
+        if target_currency:
+            print(f"\nDisplaying costs in {target_currency} (converted values marked with *)")
+            print()  # Empty line for better spacing
+        else:
+            print()  # Empty line for better spacing
+
+        # Print each root subscription and its children recursively
+        for root in roots:
+            self._print_tree_node(root, tree, sub_map, target_currency)
+
+    def _format_cost_for_tree(self, sub, target_currency=None):
+        """
+        Format cost string for tree display.
+
+        Args:
+            sub (dict): Subscription dictionary
+            target_currency (str, optional): Target currency for conversion
+
+        Returns:
+            str: Formatted cost string
+        """
+        cost = sub["converted_cost"]
+        currency = sub["display_currency"]
+        is_converted = sub.get("is_converted", False)
+
+        # Format with currency code
+        cost_str = f"{cost:.2f} {currency}"
+
+        # Add marker if converted
+        if is_converted:
+            cost_str += "*"
+
+        return cost_str
+
+    def _print_tree_node(self, subscription, tree, sub_map, target_currency=None, level=0, prefix=""):
+        """
+        Print a node in the dependency tree and its children recursively.
+
+        Args:
+            subscription (dict): Current subscription dictionary
+            tree (dict): Tree structure of parent ID to list of child subscriptions
+            sub_map (dict): Map of subscription ID to subscription
+            target_currency (str, optional): Currency to display costs in
+            level (int): Current nesting level (0 for roots)
+            prefix (str): Prefix string for indentation
+        """
+        # Get color for this subscription
+        color = self.COLORS[subscription["status"]]
+
+        # Format cost
+        cost_str = self._format_cost_for_tree(subscription, target_currency)
+
+        # Format status indicators
+        status_indicators = []
+
+        if subscription["is_in_trial"]:
+            days = subscription["days_until_trial_end"]
+            trial_indicator = f"[TRIAL: {days} day{'s' if days != 1 else ''} left]"
+            status_indicators.append(self.COLORS["TRIAL"] + trial_indicator + self.COLORS["RESET"])
+
+        if subscription["days_until_renewal"] < 0:
+            days = abs(subscription["days_until_renewal"])
+            overdue_indicator = f"[OVERDUE: {days} day{'s' if days != 1 else ''}]"
+            status_indicators.append(self.COLORS["OVERDUE"] + overdue_indicator + self.COLORS["RESET"])
+        elif subscription["days_until_renewal"] <= self.DUE_SOON_THRESHOLD:
+            days = subscription["days_until_renewal"]
+            due_soon_indicator = f"[DUE SOON: {days} day{'s' if days != 1 else ''}]"
+            status_indicators.append(self.COLORS["DUE_SOON"] + due_soon_indicator + self.COLORS["RESET"])
+
+        # Append any notes
+        if subscription["notes"]:
+            notes_indicator = f"[NOTE: {subscription['notes'][:30]}{'...' if len(subscription['notes']) > 30 else ''}]"
+            status_indicators.append(self.COLORS["NOTES"] + notes_indicator + self.COLORS["RESET"])
+
+        # Format status string
+        status_str = " ".join(status_indicators)
+
+        # Print the current subscription with appropriate indentation
+        if level == 0:
+            # Root level (no indentation or arrow)
+            print(f"{color}{subscription['name']}{self.COLORS['RESET']} ({cost_str}) {status_str}")
+        else:
+            # Child level (indented with arrow)
+            branch = self.COLORS["TREE_LINE"] + self.TREE_BRANCH + self.COLORS["RESET"]
+            print(f"{prefix}{branch}{color}{subscription['name']}{self.COLORS['RESET']} ({cost_str}) {status_str}")
+
+        # Find children of this subscription
+        subscription_id = subscription["id"]
+        if subscription_id in tree and tree[subscription_id]:
+            # Calculate new prefix for children
+            new_prefix = prefix + "  "
+
+            # Print all children recursively
+            for child in tree[subscription_id]:
+                self._print_tree_node(child, tree, sub_map, target_currency, level + 1, new_prefix)
 
     def _get_terminal_width(self):
         """
