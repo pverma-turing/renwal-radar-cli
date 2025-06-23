@@ -21,7 +21,6 @@ def get_db_path():
         app_dir.mkdir(parents=True, exist_ok=True)
     return app_dir / "subscriptions.db"
 
-
 def initialize_db():
     """Initialize the SQLite database with the required schema."""
     db_path = get_db_path()
@@ -43,13 +42,14 @@ def initialize_db():
         currency TEXT NOT NULL,
         start_date TEXT NOT NULL,
         renewal_date TEXT NOT NULL,
-        trial_end_date TEXT NOT NULL,
         payment_method TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         notes TEXT,
-        status TEXT DEFAULT 'active'
-        
+        status TEXT DEFAULT 'active',
+        trial_end_date TEXT,
+        parent_subscription_id INTEGER,
+        FOREIGN KEY (parent_subscription_id) REFERENCES subscriptions(id)
     )
     ''')
 

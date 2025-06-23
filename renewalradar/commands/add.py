@@ -87,6 +87,12 @@ class AddCommand(Command):
             help='Date when the trial period ends (YYYY-MM-DD)'
         )
 
+        parser.add_argument(
+            '--linked-to',
+            default=None,
+            help='Name of the parent subscription to link this subscription to'
+        )
+
     def _validate_cost(self, cost_str):
         """
         Validate that cost is a positive number.
@@ -207,6 +213,30 @@ class AddCommand(Command):
 
         return notes
 
+    def _find_parent_subscription(self, db_manager, parent_name):
+        """
+        Find a parent subscription by name.
+
+        Args:
+            db_manager (DatabaseManager): Database manager to use
+            parent_name (str): Name of the parent subscription
+
+        Returns:
+            dict or None: Parent subscription if found, None otherwise
+        """
+        if not parent_name:
+            return None
+
+        # Get all subscriptions
+        subscriptions = db_manager.get_all_subscriptions()
+
+        # Find the subscription with the matching name
+        for sub in subscriptions:
+            if sub["name"].lower() == parent_name.lower():
+                return sub
+
+        return None
+
     def execute(self, args):
         """
         Execute the add command with enhanced validation.
@@ -230,27 +260,41 @@ class AddCommand(Command):
             if not args.name.strip():
                 raise ValueError("Name cannot be empty")
 
-            # Create subscription object with validated data
-            subscription_data = {
-                'name': args.name.strip(),
-                'cost': cost,
-                'billing_cycle': args.billing_cycle,
-                'currency': currency,
-                'start_date': start_date,
-                'payment_method': args.payment_method.strip() if args.payment_method else '',
-                'notes': notes,
-                'trial_end_date': trial_end_date
-            }
-
-            # Add renewal_date if provided
-            if renewal_date:
-                subscription_data['renewal_date'] = renewal_date
-
-            subscription = Subscription(**subscription_data)
-
-            # Save to database
+            # Create database manager
             db_manager = DatabaseManager()
             try:
+                # Find parent subscription if linked-to argument is provided
+                parent_subscription_id = None
+                parent_subscription_name = None
+
+                if args.linked_to:
+                    parent_sub = self._find_parent_subscription(db_manager, args.linked_to)
+                    if parent_sub:
+                        parent_subscription_id = parent_sub["id"]
+                        parent_subscription_name = parent_sub["name"]
+                    else:
+                        raise ValueError(f"Parent subscription '{args.linked_to}' not found")
+
+                # Create subscription object with validated data
+                subscription_data = {
+                    'name': args.name.strip(),
+                    'cost': cost,
+                    'billing_cycle': args.billing_cycle,
+                    'currency': currency,
+                    'start_date': start_date,
+                    'payment_method': args.payment_method.strip() if args.payment_method else '',
+                    'notes': notes,
+                    'trial_end_date': trial_end_date,
+                    'parent_subscription_id': parent_subscription_id
+                }
+
+                # Add renewal_date if provided
+                if renewal_date:
+                    subscription_data['renewal_date'] = renewal_date
+
+                subscription = Subscription(**subscription_data)
+
+                # Save to database
                 subscription_id = db_manager.add_subscription(subscription.to_dict())
 
                 # Display success feedback
@@ -276,6 +320,10 @@ class AddCommand(Command):
                         trial_status = f" ({days_until_trial_end} days remaining)"
 
                     print(f"  Trial End Date: {trial_end_date}{trial_status}")
+
+                # Display parent subscription if linked
+                if parent_subscription_id:
+                    print(f"  Linked to: {parent_subscription_name} (ID: {parent_subscription_id})")
 
                 if args.billing_cycle == 'monthly':
                     print(f"  Annual cost: {subscription.calculate_annual_cost():.2f} {currency}")

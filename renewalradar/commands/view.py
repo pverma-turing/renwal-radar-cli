@@ -30,11 +30,15 @@ class ViewCommand(Command):
         'TRIAL': Fore.CYAN,
         'HEADER': Fore.CYAN + Style.BRIGHT,
         'NOTES': Fore.GREEN,
+        'PARENT': Fore.MAGENTA,
         'RESET': Style.RESET_ALL,
     }
 
     # Days thresholds for highlighting
     DUE_SOON_THRESHOLD = 7  # Days
+
+    # Symbol for indentation
+    INDENT_SYMBOL = "  ↳ "
 
     # Sample exchange rates (base: USD)
     # Format: {'CURRENCY_CODE': rate_against_USD}
@@ -57,7 +61,7 @@ class ViewCommand(Command):
         """Register command-specific arguments."""
         parser.add_argument(
             '--sort',
-            choices=['name', 'cost', 'renewal_date', 'billing_cycle', 'days', 'trial_end_date'],
+            choices=['name', 'cost', 'renewal_date', 'billing_cycle', 'days', 'trial_end_date', 'parent'],
             help='Sort subscriptions by the specified field'
         )
 
@@ -75,6 +79,12 @@ class ViewCommand(Command):
             help=f'Convert and display costs in the specified currency'
         )
 
+        parser.add_argument(
+            '--flat',
+            action='store_true',
+            help='Display subscriptions in a flat list (no parent-child indentation)'
+        )
+
     def execute(self, args):
         """Execute the view command with enhanced output and filtering."""
         try:
@@ -86,6 +96,9 @@ class ViewCommand(Command):
                 if not subscriptions:
                     print("No subscriptions found.")
                     return 0
+
+                # Build parent-child relationships
+                subscriptions = self._build_subscription_hierarchy(subscriptions)
 
                 # Enhance subscriptions with calculated fields and currency conversion
                 enhanced_subscriptions = self._enhance_subscriptions(subscriptions, target_currency=args.currency)
@@ -104,8 +117,14 @@ class ViewCommand(Command):
                 sorted_subscriptions = self._sort_subscriptions(filtered_subscriptions, args.sort,
                                                                 target_currency=args.currency)
 
+                # Organize subscriptions into hierarchy for display
+                if args.flat:
+                    display_subscriptions = sorted_subscriptions
+                else:
+                    display_subscriptions = self._organize_hierarchical_display(sorted_subscriptions)
+
                 # Display the subscriptions in a nicely formatted table
-                self._display_subscriptions(sorted_subscriptions, target_currency=args.currency)
+                self._display_subscriptions(display_subscriptions, target_currency=args.currency, flat_view=args.flat)
 
                 # Display summary information
                 self._display_summary(sorted_subscriptions, status=args.status, target_currency=args.currency)
@@ -116,6 +135,41 @@ class ViewCommand(Command):
         except Exception as e:
             print(f"An error occurred: {e}")
             return 1
+
+    def _build_subscription_hierarchy(self, subscriptions):
+        """
+        Build parent-child relationships between subscriptions.
+
+        Args:
+            subscriptions (list): List of subscription dictionaries
+
+        Returns:
+            list: Enhanced subscriptions with parent-child information
+        """
+        # Create a map of subscription ID to subscription
+        sub_map = {sub['id']: sub for sub in subscriptions}
+
+        # Add parent name and children list to each subscription
+        for sub in subscriptions:
+            # Initialize children list
+            sub['children'] = []
+
+            # Set parent name if subscription has a parent
+            parent_id = sub.get('parent_subscription_id')
+            if parent_id and parent_id in sub_map:
+                sub['parent_name'] = sub_map[parent_id]['name']
+            else:
+                sub['parent_name'] = None
+                sub['parent_subscription_id'] = None  # Clear invalid parent references
+
+        # Populate children lists
+        for sub in subscriptions:
+            parent_id = sub.get('parent_subscription_id')
+            if parent_id and parent_id in sub_map:
+                parent = sub_map[parent_id]
+                parent['children'].append(sub['id'])
+
+        return subscriptions
 
     def _convert_currency(self, amount, from_currency, to_currency):
         """
@@ -230,6 +284,12 @@ class ViewCommand(Command):
             if "trial_end_date" not in enhanced_sub or enhanced_sub["trial_end_date"] is None:
                 enhanced_sub["trial_end_date"] = ""
 
+            # Set display name for indented view
+            if enhanced_sub["parent_subscription_id"] is not None:
+                enhanced_sub["display_name"] = f"{self.INDENT_SYMBOL}{enhanced_sub['name']}"
+            else:
+                enhanced_sub["display_name"] = enhanced_sub["name"]
+
             enhanced.append(enhanced_sub)
 
         return enhanced
@@ -284,21 +344,64 @@ class ViewCommand(Command):
             list: Sorted subscription dictionaries
         """
         if not sort_by:
-            # Default sort by name if no sort field specified
-            return sorted(subscriptions, key=lambda s: s["name"].lower())
+            # Default sort by parent first, then name
+            return sorted(
+                subscriptions,
+                key=lambda s: (
+                    s.get("parent_subscription_id") is not None,  # Parents first
+                    s.get("parent_subscription_id") or 0,  # Group by parent
+                    s["name"].lower()  # Then by name
+                )
+            )
 
         # Map sort fields to their key functions
         sort_keys = {
             'name': lambda s: s["name"].lower(),
-            'cost': lambda s: s["converted_cost"],  # Sort by converted cost
+            'cost': lambda s: s["converted_cost"],
             'renewal_date': lambda s: s["renewal_date_obj"],
             'billing_cycle': lambda s: s["billing_cycle"],
             'days': lambda s: s["days_until_renewal"],
-            'trial_end_date': lambda s: s.get("trial_end_date_obj") or datetime.date.max  # Sort null values last
+            'trial_end_date': lambda s: s.get("trial_end_date_obj") or datetime.date.max,
+            'parent': lambda s: (s.get("parent_name") or "").lower()
         }
 
         key_function = sort_keys.get(sort_by, lambda s: s["name"].lower())
         return sorted(subscriptions, key=key_function)
+
+    def _organize_hierarchical_display(self, subscriptions):
+        """
+        Organize subscriptions for hierarchical display.
+
+        Args:
+            subscriptions (list): List of enhanced subscription dictionaries
+
+        Returns:
+            list: Reorganized subscriptions for display
+        """
+        # Create a map of subscription ID to subscription
+        sub_map = {sub['id']: sub for sub in subscriptions}
+
+        # Find all root subscriptions (no parent)
+        root_subs = [sub for sub in subscriptions if sub['parent_subscription_id'] is None]
+
+        # Create a display list with parents followed by their children
+        display_list = []
+        for parent in root_subs:
+            # Add parent to display list
+            display_list.append(parent)
+
+            # Add all children
+            for child_id in parent.get('children', []):
+                if child_id in sub_map:
+                    child = sub_map[child_id]
+                    if child in subscriptions:  # Make sure child passed any filters
+                        display_list.append(child)
+
+        # Add any remaining subscriptions (in case of orphaned children due to filtering)
+        remaining = [sub for sub in subscriptions if sub not in display_list]
+        display_list.extend(remaining)
+
+        return display_list
 
     def _get_terminal_width(self):
         """
@@ -325,13 +428,14 @@ class ViewCommand(Command):
             return text[:max_width - 3] + "..."
         return text
 
-    def _calculate_column_widths(self, subscriptions, target_currency=None):
+    def _calculate_column_widths(self, subscriptions, target_currency=None, flat_view=False):
         """
         Calculate optimal column widths based on data and terminal width.
 
         Args:
             subscriptions (list): List of subscriptions
             target_currency (str, optional): Target currency for display
+            flat_view (bool): Whether to use flat view (no indentation)
 
         Returns:
             dict: Column width configuration
@@ -348,13 +452,18 @@ class ViewCommand(Command):
             "start_date": 10,
             "renewal_date": 10,
             "trial_end": 10,
+            "parent": 10,
             "payment": 8,
             "days": 5,
             "notes": 8
         }
 
         # Calculate max content lengths
-        # For cost, consider the converted cost format
+        # For name, consider indentation in hierarchical view
+        name_field = "display_name" if not flat_view else "name"
+        max_name_width = max([len(s[name_field]) for s in subscriptions])
+
+        # For cost, consider the conversion format
         max_cost_width = max([
             len(f"{s['converted_cost']:.2f}") +
             (3 if s['is_converted'] else 0)  # Add space for * if converted
@@ -362,16 +471,17 @@ class ViewCommand(Command):
         ])
 
         max_widths = {
-            "name": max(min_widths["name"], max([len(s["name"]) for s in subscriptions])),
+            "name": max(min_widths["name"], max_name_width),
             "cost": max(min_widths["cost"], max_cost_width),
             "currency": max(min_widths["currency"], max([len(s["display_currency"]) for s in subscriptions])),
             "cycle": max(min_widths["cycle"], max([len(s["billing_cycle"]) for s in subscriptions])),
             "start_date": min_widths["start_date"],  # Fixed width for dates
             "renewal_date": min_widths["renewal_date"],  # Fixed width for dates
             "trial_end": min_widths["trial_end"],  # Fixed width for dates
+            "parent": max(min_widths["parent"], max([len(s.get("parent_name") or "—") for s in subscriptions])),
             "payment": max(min_widths["payment"], max([len(s["payment_method"] or "N/A") for s in subscriptions])),
             "days": min_widths["days"],  # Fixed width for days
-            "notes": max(min_widths["notes"], min(20, max([len(s["notes"]) for s in subscriptions])))  # Cap at 20 chars
+            "notes": max(min_widths["notes"], min(15, max([len(s["notes"]) for s in subscriptions])))  # Cap at 15 chars
         }
 
         # Calculate total width needed
@@ -382,14 +492,15 @@ class ViewCommand(Command):
         if total_width > terminal_width:
             # Define priorities for shrinking columns (higher = less important)
             priorities = {
-                "name": 3,
+                "name": 4,  # Name is important but can be shortened
                 "payment": 2,
                 "cost": 5,
-                "cycle": 4,
-                "currency": 4,
-                "start_date": 5,
-                "renewal_date": 5,
-                "trial_end": 5,
+                "cycle": 3,
+                "currency": 3,
+                "start_date": 4,
+                "renewal_date": 4,
+                "trial_end": 4,
+                "parent": 3,
                 "days": 6,
                 "notes": 1  # Notes can be shrunk first
             }
@@ -434,19 +545,20 @@ class ViewCommand(Command):
 
         return cost_str
 
-    def _display_subscriptions(self, subscriptions, target_currency=None):
+    def _display_subscriptions(self, subscriptions, target_currency=None, flat_view=False):
         """
         Display subscriptions in a nicely formatted table with color highlighting.
 
         Args:
             subscriptions (list): List of enhanced subscription dictionaries
             target_currency (str, optional): Currency to display costs in
+            flat_view (bool): Whether to use flat view (no indentation)
         """
         if not subscriptions:
             return
 
         # Calculate optimal column widths
-        widths = self._calculate_column_widths(subscriptions, target_currency)
+        widths = self._calculate_column_widths(subscriptions, target_currency, flat_view)
 
         # Print header
         header = (
@@ -457,6 +569,7 @@ class ViewCommand(Command):
             f"{'START':<{widths['start_date']}} "
             f"{'RENEWAL':<{widths['renewal_date']}} "
             f"{'TRIAL END':<{widths['trial_end']}} "
+            f"{'PARENT':<{widths['parent']}} "
             f"{'PAYMENT':<{widths['payment']}} "
             f"{'DAYS':<{widths['days']}} "
             f"{'NOTES':<{widths['notes']}}{self.COLORS['RESET']}"
@@ -481,11 +594,14 @@ class ViewCommand(Command):
                 days_str = f"{days}"
 
             # Format each field with truncation if needed
-            name = self._truncate_text(sub['name'], widths['name'])
+            # Use display_name for hierarchical view, regular name for flat view
+            name_field = "display_name" if not flat_view else "name"
+            name = self._truncate_text(sub[name_field], widths['name'])
             payment = self._truncate_text(sub['payment_method'] or 'N/A', widths['payment'])
             notes = self._truncate_text(sub['notes'] or '-', widths['notes'])
             trial_end = sub['trial_end_date'] or "—"  # Display dash if no trial end date
             cost_str = self._format_cost(sub, widths['cost'])
+            parent = sub.get('parent_name') or "—"  # Display dash if no parent
 
             # Print the formatted row with color
             row = (
@@ -496,6 +612,7 @@ class ViewCommand(Command):
                 f"{sub['start_date']:<{widths['start_date']}} "
                 f"{sub['renewal_date']:<{widths['renewal_date']}} "
                 f"{trial_end:<{widths['trial_end']}} "
+                f"{self.COLORS['PARENT'] if parent != '—' else ''}{parent:<{widths['parent']}}{self.COLORS['RESET'] if parent != '—' else ''} "
                 f"{payment:<{widths['payment']}} "
                 f"{days_str:<{widths['days']}} "
                 f"{self.COLORS['NOTES']}{notes}{self.COLORS['RESET']}"
@@ -513,6 +630,10 @@ class ViewCommand(Command):
         """
         # Count subscriptions
         total_count = len(subscriptions)
+
+        # Count parent and child subscriptions
+        parent_count = sum(1 for sub in subscriptions if sub['parent_subscription_id'] is None)
+        child_count = sum(1 for sub in subscriptions if sub['parent_subscription_id'] is not None)
 
         # Calculate total monthly and yearly costs
         if target_currency:
@@ -568,6 +689,8 @@ class ViewCommand(Command):
 
         print(f"\n{self.COLORS['HEADER']}SUMMARY: {status_desc.get(status, 'Subscriptions')}{self.COLORS['RESET']}")
         print(f"Total subscriptions: {total_count}")
+        print(f"{self.COLORS['PARENT']}Parent subscriptions: {parent_count}{self.COLORS['RESET']}")
+        print(f"{self.COLORS['PARENT']}Child subscriptions: {child_count}{self.COLORS['RESET']}")
 
         # Show status breakdown only if showing all subscriptions
         if status == 'all':

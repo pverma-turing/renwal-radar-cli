@@ -18,7 +18,7 @@ class Subscription:
 
     def __init__(self, name, cost, billing_cycle, currency, start_date,
                  renewal_date=None, payment_method='', notes=None, status='active',
-                 trial_end_date=None):
+                 trial_end_date=None, parent_subscription_id=None):
         """
         Initialize a new subscription.
 
@@ -33,6 +33,7 @@ class Subscription:
             notes (str, optional): Additional notes about the subscription
             status (str, optional): Subscription status ('active', 'cancelled', 'paused')
             trial_end_date (str, optional): Date when the trial period ends in ISO format
+            parent_subscription_id (int, optional): ID of the parent subscription
 
         Raises:
             ValueError: If any of the required fields are invalid
@@ -52,9 +53,8 @@ class Subscription:
         self.payment_method = payment_method
         self.notes = notes
         self.status = status
-
-        # Set the trial end date if provided
         self.trial_end_date = trial_end_date
+        self.parent_subscription_id = parent_subscription_id
 
         # Set timestamps
         current_time = datetime.datetime.now().isoformat()
@@ -184,7 +184,8 @@ class Subscription:
             'status': self.status,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
-            'trial_end_date': self.trial_end_date
+            'trial_end_date': self.trial_end_date,
+            'parent_subscription_id': self.parent_subscription_id
         }
 
     @classmethod
@@ -209,7 +210,8 @@ class Subscription:
             payment_method=data.get('payment_method', ''),
             notes=data.get('notes'),
             status=data.get('status', 'active'),
-            trial_end_date=data.get('trial_end_date')
+            trial_end_date=data.get('trial_end_date'),
+            parent_subscription_id=data.get('parent_subscription_id')
         )
 
         # Set timestamps if available
