@@ -5,7 +5,7 @@ Main CLI entry point for RenewalRadar subscription manager.
 import argparse
 import sys
 import os
-
+from . import __version__
 from renewalradar.config import COMMANDS
 
 
@@ -31,6 +31,11 @@ def setup_parsers(subparsers):
         command.setup_parser(subparsers)
 
 def main():
+    # Check for version flag at the beginning
+    if len(sys.argv) > 1 and sys.argv[1] == '--version':
+        print(f"RenewalRadar CLI v{__version__}")
+        return 0
+
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         description="RenewalRadar - A subscription manager CLI",
@@ -40,7 +45,7 @@ def main():
     parser.add_argument(
         '--version',
         action='version',
-        version='%(prog)s 1.0.0'
+        version=f"RenewalRadar CLI v{__version__}"
     )
 
     # Initialize subparsers for commands
