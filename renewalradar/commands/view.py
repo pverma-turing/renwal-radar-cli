@@ -36,6 +36,22 @@ class ViewCommand(Command):
     # Days thresholds for highlighting
     DUE_SOON_THRESHOLD = 7  # Days
 
+    # Sample exchange rates (base: USD)
+    # Format: {'CURRENCY_CODE': rate_against_USD}
+    EXCHANGE_RATES = {
+        'USD': 1.00,
+        'EUR': 0.85,
+        'GBP': 0.74,
+        'JPY': 113.50,
+        'CAD': 1.25,
+        'AUD': 1.35,
+        'CHF': 0.92,
+        'INR': 74.50,
+        'CNY': 6.39,
+        'HKD': 7.78,
+        # Add more currencies as needed
+    }
+
     @classmethod
     def register_arguments(cls, parser):
         """Register command-specific arguments."""
@@ -53,6 +69,12 @@ class ViewCommand(Command):
                  'overdue, or trial (active trials)'
         )
 
+        parser.add_argument(
+            '--currency',
+            choices=list(cls.EXCHANGE_RATES.keys()),
+            help=f'Convert and display costs in the specified currency'
+        )
+
     def execute(self, args):
         """Execute the view command with enhanced output and filtering."""
         try:
@@ -65,8 +87,8 @@ class ViewCommand(Command):
                     print("No subscriptions found.")
                     return 0
 
-                # Enhance subscriptions with calculated fields
-                enhanced_subscriptions = self._enhance_subscriptions(subscriptions)
+                # Enhance subscriptions with calculated fields and currency conversion
+                enhanced_subscriptions = self._enhance_subscriptions(subscriptions, target_currency=args.currency)
 
                 # Apply status filtering
                 filtered_subscriptions = self._filter_by_status(enhanced_subscriptions, args.status)
@@ -79,13 +101,14 @@ class ViewCommand(Command):
                     return 0
 
                 # Apply sorting (if specified)
-                sorted_subscriptions = self._sort_subscriptions(filtered_subscriptions, args.sort)
+                sorted_subscriptions = self._sort_subscriptions(filtered_subscriptions, args.sort,
+                                                                target_currency=args.currency)
 
                 # Display the subscriptions in a nicely formatted table
-                self._display_subscriptions(sorted_subscriptions)
+                self._display_subscriptions(sorted_subscriptions, target_currency=args.currency)
 
                 # Display summary information
-                self._display_summary(sorted_subscriptions, status=args.status)
+                self._display_summary(sorted_subscriptions, status=args.status, target_currency=args.currency)
                 return 0
             finally:
                 db_manager.close()
@@ -94,12 +117,42 @@ class ViewCommand(Command):
             print(f"An error occurred: {e}")
             return 1
 
-    def _enhance_subscriptions(self, subscriptions):
+    def _convert_currency(self, amount, from_currency, to_currency):
+        """
+        Convert an amount from one currency to another using exchange rates.
+
+        Args:
+            amount (float): The amount to convert
+            from_currency (str): Source currency code
+            to_currency (str): Target currency code
+
+        Returns:
+            float: Converted amount
+
+        Raises:
+            ValueError: If currency codes are not supported
+        """
+        # If currencies are the same or no target currency, no conversion needed
+        if from_currency == to_currency or not to_currency:
+            return amount
+
+        # Check if both currencies are supported
+        if from_currency not in self.EXCHANGE_RATES:
+            raise ValueError(f"Unsupported source currency: {from_currency}")
+        if to_currency not in self.EXCHANGE_RATES:
+            raise ValueError(f"Unsupported target currency: {to_currency}")
+
+        # Convert to USD first (as base currency), then to target currency
+        amount_in_usd = amount / self.EXCHANGE_RATES[from_currency]
+        return amount_in_usd * self.EXCHANGE_RATES[to_currency]
+
+    def _enhance_subscriptions(self, subscriptions, target_currency=None):
         """
         Enhance subscriptions with additional calculated fields.
 
         Args:
             subscriptions (list): List of subscription dictionaries
+            target_currency (str, optional): Currency to convert costs to
 
         Returns:
             list: Enhanced subscription dictionaries
@@ -137,6 +190,30 @@ class ViewCommand(Command):
             enhanced_sub["status"] = status
             enhanced_sub["is_in_trial"] = is_in_trial
             enhanced_sub["days_until_trial_end"] = days_until_trial_end
+
+            # Handle currency conversion
+            enhanced_sub["original_currency"] = sub["currency"]
+            enhanced_sub["original_cost"] = sub["cost"]
+
+            # Convert cost if target currency is specified
+            if target_currency:
+                try:
+                    enhanced_sub["converted_cost"] = self._convert_currency(
+                        sub["cost"], sub["currency"], target_currency
+                    )
+                    enhanced_sub["display_currency"] = target_currency
+                    enhanced_sub["is_converted"] = (sub["currency"] != target_currency)
+                except ValueError as e:
+                    # If conversion fails, use original currency
+                    enhanced_sub["converted_cost"] = sub["cost"]
+                    enhanced_sub["display_currency"] = sub["currency"]
+                    enhanced_sub["is_converted"] = False
+                    print(f"Warning: {e}. Using original currency for {sub['name']}.")
+            else:
+                # Use original currency if no target specified
+                enhanced_sub["converted_cost"] = sub["cost"]
+                enhanced_sub["display_currency"] = sub["currency"]
+                enhanced_sub["is_converted"] = False
 
             # Add parsed dates for easier handling
             enhanced_sub["start_date_obj"] = parse_date(sub["start_date"]).date()
@@ -194,13 +271,14 @@ class ViewCommand(Command):
 
         return subscriptions  # Fallback
 
-    def _sort_subscriptions(self, subscriptions, sort_by):
+    def _sort_subscriptions(self, subscriptions, sort_by, target_currency=None):
         """
         Sort subscriptions by the specified field.
 
         Args:
             subscriptions (list): List of enhanced subscription dictionaries
             sort_by (str): Field to sort by
+            target_currency (str, optional): Currency being used for display
 
         Returns:
             list: Sorted subscription dictionaries
@@ -212,7 +290,7 @@ class ViewCommand(Command):
         # Map sort fields to their key functions
         sort_keys = {
             'name': lambda s: s["name"].lower(),
-            'cost': lambda s: s["cost"],
+            'cost': lambda s: s["converted_cost"],  # Sort by converted cost
             'renewal_date': lambda s: s["renewal_date_obj"],
             'billing_cycle': lambda s: s["billing_cycle"],
             'days': lambda s: s["days_until_renewal"],
@@ -247,12 +325,13 @@ class ViewCommand(Command):
             return text[:max_width - 3] + "..."
         return text
 
-    def _calculate_column_widths(self, subscriptions):
+    def _calculate_column_widths(self, subscriptions, target_currency=None):
         """
         Calculate optimal column widths based on data and terminal width.
 
         Args:
             subscriptions (list): List of subscriptions
+            target_currency (str, optional): Target currency for display
 
         Returns:
             dict: Column width configuration
@@ -268,17 +347,24 @@ class ViewCommand(Command):
             "cycle": 6,
             "start_date": 10,
             "renewal_date": 10,
-            "trial_end": 10,  # Added for trial end date
+            "trial_end": 10,
             "payment": 8,
             "days": 5,
             "notes": 8
         }
 
         # Calculate max content lengths
+        # For cost, consider the converted cost format
+        max_cost_width = max([
+            len(f"{s['converted_cost']:.2f}") +
+            (3 if s['is_converted'] else 0)  # Add space for * if converted
+            for s in subscriptions
+        ])
+
         max_widths = {
             "name": max(min_widths["name"], max([len(s["name"]) for s in subscriptions])),
-            "cost": max(min_widths["cost"], max([len(f"{s['cost']:.2f}") for s in subscriptions])),
-            "currency": max(min_widths["currency"], max([len(s["currency"]) for s in subscriptions])),
+            "cost": max(min_widths["cost"], max_cost_width),
+            "currency": max(min_widths["currency"], max([len(s["display_currency"]) for s in subscriptions])),
             "cycle": max(min_widths["cycle"], max([len(s["billing_cycle"]) for s in subscriptions])),
             "start_date": min_widths["start_date"],  # Fixed width for dates
             "renewal_date": min_widths["renewal_date"],  # Fixed width for dates
@@ -324,18 +410,43 @@ class ViewCommand(Command):
 
         return max_widths
 
-    def _display_subscriptions(self, subscriptions):
+    def _format_cost(self, subscription, width):
+        """
+        Format a cost value for display, handling currency conversion.
+
+        Args:
+            subscription (dict): Enhanced subscription with cost info
+            width (int): Column width to fit
+
+        Returns:
+            str: Formatted cost string
+        """
+        cost = subscription["converted_cost"]
+        currency = subscription["display_currency"]
+        is_converted = subscription.get("is_converted", False)
+
+        # Format the cost with 2 decimal places
+        cost_str = f"{cost:.2f}"
+
+        # Add an asterisk if the cost was converted
+        if is_converted:
+            cost_str = f"{cost_str}*"
+
+        return cost_str
+
+    def _display_subscriptions(self, subscriptions, target_currency=None):
         """
         Display subscriptions in a nicely formatted table with color highlighting.
 
         Args:
             subscriptions (list): List of enhanced subscription dictionaries
+            target_currency (str, optional): Currency to display costs in
         """
         if not subscriptions:
             return
 
         # Calculate optimal column widths
-        widths = self._calculate_column_widths(subscriptions)
+        widths = self._calculate_column_widths(subscriptions, target_currency)
 
         # Print header
         header = (
@@ -352,6 +463,10 @@ class ViewCommand(Command):
         )
         print("\n" + header)
         print("-" * len(header.replace(self.COLORS['HEADER'], '').replace(self.COLORS['RESET'], '')))
+
+        # Print message regarding currency conversion if applicable
+        if target_currency:
+            print(f"Displaying costs in {target_currency} (converted values marked with *)")
 
         # Print each subscription
         for sub in subscriptions:
@@ -370,12 +485,13 @@ class ViewCommand(Command):
             payment = self._truncate_text(sub['payment_method'] or 'N/A', widths['payment'])
             notes = self._truncate_text(sub['notes'] or '-', widths['notes'])
             trial_end = sub['trial_end_date'] or "—"  # Display dash if no trial end date
+            cost_str = self._format_cost(sub, widths['cost'])
 
             # Print the formatted row with color
             row = (
                 f"{color}{name:<{widths['name']}} "
-                f"{sub['cost']:<{widths['cost']}.2f} "
-                f"{sub['currency']:<{widths['currency']}} "
+                f"{cost_str:<{widths['cost']}} "
+                f"{sub['display_currency']:<{widths['currency']}} "
                 f"{sub['billing_cycle']:<{widths['cycle']}} "
                 f"{sub['start_date']:<{widths['start_date']}} "
                 f"{sub['renewal_date']:<{widths['renewal_date']}} "
@@ -386,46 +502,53 @@ class ViewCommand(Command):
             )
             print(row)
 
-    def _display_subscription_details(self, subscription):
-        """
-        Display detailed view of a single subscription including full notes.
-
-        Args:
-            subscription (dict): Subscription dictionary
-        """
-        # TODO: Future implementation for viewing full details of a subscription
-        pass
-
-    def _display_summary(self, subscriptions, status='all'):
+    def _display_summary(self, subscriptions, status='all', target_currency=None):
         """
         Display summary information about subscriptions.
 
         Args:
             subscriptions (list): List of enhanced subscription dictionaries
             status (str): Current status filter
+            target_currency (str, optional): Currency to display totals in
         """
         # Count subscriptions
         total_count = len(subscriptions)
 
-        # Calculate total monthly and yearly costs by currency
-        monthly_totals = {}
-        yearly_totals = {}
+        # Calculate total monthly and yearly costs
+        if target_currency:
+            # When a target currency is specified, use the converted costs
+            monthly_totals = {target_currency: 0}
+            yearly_totals = {target_currency: 0}
 
-        for sub in subscriptions:
-            cost = sub["cost"]
-            currency = sub["currency"]
+            for sub in subscriptions:
+                cost = sub["converted_cost"]  # Already converted
 
-            # Initialize totals for this currency if not exist
-            if currency not in monthly_totals:
-                monthly_totals[currency] = 0
-                yearly_totals[currency] = 0
+                if sub["billing_cycle"] == "monthly":
+                    monthly_totals[target_currency] += cost
+                    yearly_totals[target_currency] += cost * 12
+                elif sub["billing_cycle"] == "yearly":
+                    monthly_totals[target_currency] += cost / 12
+                    yearly_totals[target_currency] += cost
+        else:
+            # Original behavior: group by original currency
+            monthly_totals = {}
+            yearly_totals = {}
 
-            if sub["billing_cycle"] == "monthly":
-                monthly_totals[currency] += cost
-                yearly_totals[currency] += cost * 12
-            elif sub["billing_cycle"] == "yearly":
-                monthly_totals[currency] += cost / 12
-                yearly_totals[currency] += cost
+            for sub in subscriptions:
+                cost = sub["original_cost"]
+                currency = sub["original_currency"]
+
+                # Initialize totals for this currency if not exist
+                if currency not in monthly_totals:
+                    monthly_totals[currency] = 0
+                    yearly_totals[currency] = 0
+
+                if sub["billing_cycle"] == "monthly":
+                    monthly_totals[currency] += cost
+                    yearly_totals[currency] += cost * 12
+                elif sub["billing_cycle"] == "yearly":
+                    monthly_totals[currency] += cost / 12
+                    yearly_totals[currency] += cost
 
         # Count status breakdown
         overdue_count = sum(1 for sub in subscriptions if sub["days_until_renewal"] < 0)
@@ -456,12 +579,15 @@ class ViewCommand(Command):
         # Show count of subscriptions with notes
         print(f"{self.COLORS['NOTES']}With notes: {with_notes_count}{self.COLORS['RESET']}")
 
-        # Show cost total by currency
-        print("\nMonthly costs:")
+        # Show cost totals
+        # If a target currency is used, indicate that values are converted
+        conversion_note = " (converted)" if target_currency else ""
+
+        print(f"\nMonthly costs{conversion_note}:")
         for currency, total in monthly_totals.items():
             print(f"  {currency}: {total:.2f}")
 
-        print("\nYearly costs:")
+        print(f"\nYearly costs{conversion_note}:")
         for currency, total in yearly_totals.items():
             print(f"  {currency}: {total:.2f}")
 
