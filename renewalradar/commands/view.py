@@ -81,6 +81,12 @@ class ViewCommand(Command):
             help=f'Convert and display costs in the specified currency'
         )
 
+        parser.add_argument(
+            '--limit',
+            type=int,
+            help='Limit the number of subscriptions displayed'
+        )
+
         # Display format options - make these mutually exclusive
         display_group = parser.add_mutually_exclusive_group()
 
@@ -124,28 +130,47 @@ class ViewCommand(Command):
                     print(status_message + ".")
                     return 0
 
+                # Store total count before applying limit
+                total_subscription_count = len(filtered_subscriptions)
+
                 # Choose display format based on flags
                 if args.show_dependency_tree:
                     # Build and display dependency tree
-                    self._display_dependency_tree(filtered_subscriptions, target_currency=args.currency)
+                    self._display_dependency_tree(
+                        filtered_subscriptions,
+                        target_currency=args.currency,
+                        limit=args.limit
+                    )
                 else:
-                    # Use regular tabular display
                     # Apply sorting (if specified)
                     sorted_subscriptions = self._sort_subscriptions(
                         filtered_subscriptions, args.sort, target_currency=args.currency
                     )
 
+                    # Apply limit (if specified)
+                    limited_subscriptions = sorted_subscriptions
+                    if args.limit is not None and args.limit > 0:
+                        limited_subscriptions = sorted_subscriptions[:args.limit]
+
                     # Organize subscriptions into hierarchy for display
                     if args.flat:
-                        display_subscriptions = sorted_subscriptions
+                        display_subscriptions = limited_subscriptions
                     else:
-                        display_subscriptions = self._organize_hierarchical_display(sorted_subscriptions)
+                        display_subscriptions = self._organize_hierarchical_display(limited_subscriptions)
 
                     # Display the subscriptions in a nicely formatted table
-                    self._display_subscriptions(display_subscriptions, target_currency=args.currency,
-                                                flat_view=args.flat)
+                    self._display_subscriptions(
+                        display_subscriptions,
+                        target_currency=args.currency,
+                        flat_view=args.flat
+                    )
 
-                # Display summary information
+                    # Show limit message if applicable
+                    if args.limit is not None and args.limit > 0 and args.limit < total_subscription_count:
+                        print(
+                            f"\nShowing first {len(limited_subscriptions)} of {total_subscription_count} subscriptions.")
+
+                # Display summary information (based on full filtered set, not the limited display set)
                 self._display_summary(filtered_subscriptions, status=args.status, target_currency=args.currency)
                 return 0
             finally:
@@ -462,13 +487,14 @@ class ViewCommand(Command):
 
         return display_list
 
-    def _display_dependency_tree(self, subscriptions, target_currency=None):
+    def _display_dependency_tree(self, subscriptions, target_currency=None, limit=None):
         """
         Display subscriptions as a parent-child dependency tree.
 
         Args:
             subscriptions (list): List of enhanced subscription dictionaries
             target_currency (str, optional): Currency to display costs in
+            limit (int, optional): Maximum number of root subscriptions to show
         """
         if not subscriptions:
             return
@@ -486,9 +512,19 @@ class ViewCommand(Command):
         else:
             print()  # Empty line for better spacing
 
+        # Apply limit if specified
+        display_roots = roots
+        total_count = len(roots)
+        if limit is not None and limit > 0 and limit < len(roots):
+            display_roots = roots[:limit]
+
         # Print each root subscription and its children recursively
-        for root in roots:
+        for root in display_roots:
             self._print_tree_node(root, tree, sub_map, target_currency)
+
+        # Show limit message if applicable
+        if limit is not None and limit > 0 and limit < total_count:
+            print(f"\nShowing first {len(display_roots)} of {total_count} root subscriptions.")
 
     def _format_cost_for_tree(self, sub, target_currency=None):
         """
