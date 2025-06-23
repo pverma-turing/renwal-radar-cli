@@ -27,6 +27,7 @@ class ViewCommand(Command):
         'OVERDUE': Fore.RED,
         'DUE_SOON': Fore.YELLOW,
         'NORMAL': Fore.WHITE,
+        'TRIAL': Fore.CYAN,
         'HEADER': Fore.CYAN + Style.BRIGHT,
         'NOTES': Fore.GREEN,
         'RESET': Style.RESET_ALL,
@@ -40,15 +41,16 @@ class ViewCommand(Command):
         """Register command-specific arguments."""
         parser.add_argument(
             '--sort',
-            choices=['name', 'cost', 'renewal_date', 'billing_cycle', 'days'],
+            choices=['name', 'cost', 'renewal_date', 'billing_cycle', 'days', 'trial_end_date'],
             help='Sort subscriptions by the specified field'
         )
 
         parser.add_argument(
             '--status',
-            choices=['all', 'upcoming', 'overdue'],
+            choices=['all', 'upcoming', 'overdue', 'trial'],
             default='all',
-            help='Filter subscriptions by status: all (default), upcoming (next 30 days), or overdue'
+            help='Filter subscriptions by status: all (default), upcoming (next 30 days), '
+                 'overdue, or trial (active trials)'
         )
 
     def execute(self, args):
@@ -109,8 +111,20 @@ class ViewCommand(Command):
             # Calculate days until renewal
             days = days_until_renewal(sub["renewal_date"])
 
+            # Parse trial end date if exists
+            trial_end_date_obj = None
+            days_until_trial_end = None
+            is_in_trial = False
+
+            if sub.get("trial_end_date"):
+                trial_end_date_obj = parse_date(sub["trial_end_date"]).date()
+                days_until_trial_end = (trial_end_date_obj - today).days
+                is_in_trial = days_until_trial_end >= 0  # Trial is active if end date is today or in future
+
             # Determine status for coloring
-            if days < 0:
+            if is_in_trial:
+                status = "TRIAL"
+            elif days < 0:
                 status = "OVERDUE"
             elif days <= self.DUE_SOON_THRESHOLD:
                 status = "DUE_SOON"
@@ -121,14 +135,23 @@ class ViewCommand(Command):
             enhanced_sub = {**sub}  # Create a copy
             enhanced_sub["days_until_renewal"] = days
             enhanced_sub["status"] = status
+            enhanced_sub["is_in_trial"] = is_in_trial
+            enhanced_sub["days_until_trial_end"] = days_until_trial_end
 
             # Add parsed dates for easier handling
             enhanced_sub["start_date_obj"] = parse_date(sub["start_date"]).date()
             enhanced_sub["renewal_date_obj"] = parse_date(sub["renewal_date"]).date()
 
+            if trial_end_date_obj:
+                enhanced_sub["trial_end_date_obj"] = trial_end_date_obj
+
             # Ensure notes is a string (even if None)
             if enhanced_sub["notes"] is None:
                 enhanced_sub["notes"] = ""
+
+            # Ensure trial_end_date is a string (even if None)
+            if "trial_end_date" not in enhanced_sub or enhanced_sub["trial_end_date"] is None:
+                enhanced_sub["trial_end_date"] = ""
 
             enhanced.append(enhanced_sub)
 
@@ -140,7 +163,7 @@ class ViewCommand(Command):
 
         Args:
             subscriptions (list): List of enhanced subscription dictionaries
-            status (str): One of 'all', 'upcoming', 'overdue'
+            status (str): One of 'all', 'upcoming', 'overdue', 'trial'
 
         Returns:
             list: Filtered subscription dictionaries
@@ -161,6 +184,12 @@ class ViewCommand(Command):
             return [
                 sub for sub in subscriptions
                 if sub["renewal_date_obj"] < today
+            ]
+
+        if status == 'trial':
+            return [
+                sub for sub in subscriptions
+                if sub["is_in_trial"]
             ]
 
         return subscriptions  # Fallback
@@ -186,7 +215,8 @@ class ViewCommand(Command):
             'cost': lambda s: s["cost"],
             'renewal_date': lambda s: s["renewal_date_obj"],
             'billing_cycle': lambda s: s["billing_cycle"],
-            'days': lambda s: s["days_until_renewal"]
+            'days': lambda s: s["days_until_renewal"],
+            'trial_end_date': lambda s: s.get("trial_end_date_obj") or datetime.date.max  # Sort null values last
         }
 
         key_function = sort_keys.get(sort_by, lambda s: s["name"].lower())
@@ -238,9 +268,10 @@ class ViewCommand(Command):
             "cycle": 6,
             "start_date": 10,
             "renewal_date": 10,
+            "trial_end": 10,  # Added for trial end date
             "payment": 8,
             "days": 5,
-            "notes": 10  # Added minimum width for notes
+            "notes": 8
         }
 
         # Calculate max content lengths
@@ -251,9 +282,10 @@ class ViewCommand(Command):
             "cycle": max(min_widths["cycle"], max([len(s["billing_cycle"]) for s in subscriptions])),
             "start_date": min_widths["start_date"],  # Fixed width for dates
             "renewal_date": min_widths["renewal_date"],  # Fixed width for dates
+            "trial_end": min_widths["trial_end"],  # Fixed width for dates
             "payment": max(min_widths["payment"], max([len(s["payment_method"] or "N/A") for s in subscriptions])),
             "days": min_widths["days"],  # Fixed width for days
-            "notes": max(min_widths["notes"], min(30, max([len(s["notes"]) for s in subscriptions])))  # Cap at 30 chars
+            "notes": max(min_widths["notes"], min(20, max([len(s["notes"]) for s in subscriptions])))  # Cap at 20 chars
         }
 
         # Calculate total width needed
@@ -271,6 +303,7 @@ class ViewCommand(Command):
                 "currency": 4,
                 "start_date": 5,
                 "renewal_date": 5,
+                "trial_end": 5,
                 "days": 6,
                 "notes": 1  # Notes can be shrunk first
             }
@@ -312,6 +345,7 @@ class ViewCommand(Command):
             f"{'CYCLE':<{widths['cycle']}} "
             f"{'START':<{widths['start_date']}} "
             f"{'RENEWAL':<{widths['renewal_date']}} "
+            f"{'TRIAL END':<{widths['trial_end']}} "
             f"{'PAYMENT':<{widths['payment']}} "
             f"{'DAYS':<{widths['days']}} "
             f"{'NOTES':<{widths['notes']}}{self.COLORS['RESET']}"
@@ -335,6 +369,7 @@ class ViewCommand(Command):
             name = self._truncate_text(sub['name'], widths['name'])
             payment = self._truncate_text(sub['payment_method'] or 'N/A', widths['payment'])
             notes = self._truncate_text(sub['notes'] or '-', widths['notes'])
+            trial_end = sub['trial_end_date'] or "—"  # Display dash if no trial end date
 
             # Print the formatted row with color
             row = (
@@ -344,6 +379,7 @@ class ViewCommand(Command):
                 f"{sub['billing_cycle']:<{widths['cycle']}} "
                 f"{sub['start_date']:<{widths['start_date']}} "
                 f"{sub['renewal_date']:<{widths['renewal_date']}} "
+                f"{trial_end:<{widths['trial_end']}} "
                 f"{payment:<{widths['payment']}} "
                 f"{days_str:<{widths['days']}} "
                 f"{self.COLORS['NOTES']}{notes}{self.COLORS['RESET']}"
@@ -394,12 +430,18 @@ class ViewCommand(Command):
         # Count status breakdown
         overdue_count = sum(1 for sub in subscriptions if sub["days_until_renewal"] < 0)
         due_soon_count = sum(1 for sub in subscriptions if 0 <= sub["days_until_renewal"] <= self.DUE_SOON_THRESHOLD)
+        trial_count = sum(1 for sub in subscriptions if sub["is_in_trial"])
 
         # Count subscriptions with notes
         with_notes_count = sum(1 for sub in subscriptions if sub["notes"])
 
         # Print summary
-        status_desc = {'all': 'All subscriptions', 'upcoming': 'Upcoming renewals', 'overdue': 'Overdue subscriptions'}
+        status_desc = {
+            'all': 'All subscriptions',
+            'upcoming': 'Upcoming renewals',
+            'overdue': 'Overdue subscriptions',
+            'trial': 'Trial subscriptions'
+        }
 
         print(f"\n{self.COLORS['HEADER']}SUMMARY: {status_desc.get(status, 'Subscriptions')}{self.COLORS['RESET']}")
         print(f"Total subscriptions: {total_count}")
@@ -409,6 +451,7 @@ class ViewCommand(Command):
             print(f"{self.COLORS['OVERDUE']}Overdue: {overdue_count}{self.COLORS['RESET']}")
             print(
                 f"{self.COLORS['DUE_SOON']}Due within {self.DUE_SOON_THRESHOLD} days: {due_soon_count}{self.COLORS['RESET']}")
+            print(f"{self.COLORS['TRIAL']}In trial period: {trial_count}{self.COLORS['RESET']}")
 
         # Show count of subscriptions with notes
         print(f"{self.COLORS['NOTES']}With notes: {with_notes_count}{self.COLORS['RESET']}")
@@ -422,19 +465,42 @@ class ViewCommand(Command):
         for currency, total in yearly_totals.items():
             print(f"  {currency}: {total:.2f}")
 
+        # Show upcoming trials ending if there are any
+        upcoming_trial_ends = [
+            (sub["name"], sub["trial_end_date"], sub["days_until_trial_end"])
+            for sub in subscriptions
+            if sub["trial_end_date"] and -7 <= sub["days_until_trial_end"] <= 30
+        ]
+
+        if upcoming_trial_ends and (status == 'all' or status == 'trial'):
+            print(f"\n{self.COLORS['TRIAL']}Trial end dates (next 30 days):{self.COLORS['RESET']}")
+            for name, date, days in sorted(upcoming_trial_ends, key=lambda x: x[2]):
+                if days < 0:
+                    print(f"  {self.COLORS['TRIAL']}{name}: {date} (ended {abs(days)} days ago){self.COLORS['RESET']}")
+                elif days == 0:
+                    print(f"  {self.COLORS['TRIAL']}{name}: {date} (ends today){self.COLORS['RESET']}")
+                else:
+                    print(f"  {self.COLORS['TRIAL']}{name}: {date} (ends in {days} days){self.COLORS['RESET']}")
+
         # Show most imminent renewals if there are any
         upcoming_renewals = [
-            (sub["name"], sub["renewal_date"], sub["days_until_renewal"])
+            (sub["name"], sub["renewal_date"], sub["days_until_renewal"], sub["is_in_trial"])
             for sub in subscriptions
             if -30 <= sub["days_until_renewal"] <= 30  # Show renewals within +/- 30 days
         ]
 
         if upcoming_renewals:
             print("\nRecent & upcoming renewals (±30 days):")
-            for name, date, days in sorted(upcoming_renewals, key=lambda x: x[2]):
+            for name, date, days, is_trial in sorted(upcoming_renewals, key=lambda x: x[2]):
+                color = self.COLORS['TRIAL'] if is_trial else (
+                    self.COLORS['OVERDUE'] if days < 0 else
+                    self.COLORS['DUE_SOON'] if days <= self.DUE_SOON_THRESHOLD else
+                    self.COLORS['NORMAL']
+                )
+
                 if days < 0:
-                    print(f"  {self.COLORS['OVERDUE']}{name}: {date} ({days} days ago - OVERDUE){self.COLORS['RESET']}")
-                elif days <= self.DUE_SOON_THRESHOLD:
-                    print(f"  {self.COLORS['DUE_SOON']}{name}: {date} (in {days} days){self.COLORS['RESET']}")
+                    print(f"  {color}{name}: {date} ({days} days ago - OVERDUE){self.COLORS['RESET']}")
+                elif days == 0:
+                    print(f"  {color}{name}: {date} (today){self.COLORS['RESET']}")
                 else:
-                    print(f"  {name}: {date} (in {days} days)")
+                    print(f"  {color}{name}: {date} (in {days} days){self.COLORS['RESET']}")

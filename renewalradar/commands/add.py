@@ -81,6 +81,12 @@ class AddCommand(Command):
             help='Additional notes or comments about the subscription (free text)'
         )
 
+        parser.add_argument(
+            '--trial-end-date',
+            default=None,
+            help='Date when the trial period ends (YYYY-MM-DD)'
+        )
+
     def _validate_cost(self, cost_str):
         """
         Validate that cost is a positive number.
@@ -119,25 +125,30 @@ class AddCommand(Command):
             )
         return currency.upper()  # Normalize to uppercase
 
-    def _validate_dates(self, start_date, renewal_date=None):
+    def _validate_dates(self, start_date, renewal_date=None, trial_end_date=None):
         """
-        Validate start_date and optional renewal_date.
+        Validate start_date, renewal_date and trial_end_date.
 
         Args:
             start_date (str): Start date as string
             renewal_date (str, optional): Renewal date as string
+            trial_end_date (str, optional): Trial end date as string
 
         Returns:
-            tuple: (start_date, renewal_date) as strings
+            tuple: (start_date, renewal_date, trial_end_date) as strings
 
         Raises:
-            ValueError: If dates are invalid or renewal_date is before start_date
+            ValueError: If dates are invalid or have invalid relationships
         """
         # Validate start_date format
         if not validate_date_format(start_date):
             raise ValueError(
                 f"Invalid start date format: '{start_date}'. Use YYYY-MM-DD format."
             )
+
+        start_date_obj = parse_date(start_date).date()
+        renewal_date_obj = None
+        trial_end_date_obj = None
 
         # If renewal_date is provided, validate it
         if renewal_date:
@@ -146,16 +157,33 @@ class AddCommand(Command):
                     f"Invalid renewal date format: '{renewal_date}'. Use YYYY-MM-DD format."
                 )
 
-            # Check that renewal_date is not earlier than start_date
-            start_date_obj = parse_date(start_date)
-            renewal_date_obj = parse_date(renewal_date)
+            renewal_date_obj = parse_date(renewal_date).date()
 
             if renewal_date_obj < start_date_obj:
                 raise ValueError(
                     f"Renewal date ({renewal_date}) cannot be earlier than start date ({start_date})."
                 )
 
-        return start_date, renewal_date
+        # If trial_end_date is provided, validate it
+        if trial_end_date:
+            if not validate_date_format(trial_end_date):
+                raise ValueError(
+                    f"Invalid trial end date format: '{trial_end_date}'. Use YYYY-MM-DD format."
+                )
+
+            trial_end_date_obj = parse_date(trial_end_date).date()
+
+            # Trial end date should not be before start date
+            if trial_end_date_obj < start_date_obj:
+                raise ValueError(
+                    f"Trial end date ({trial_end_date}) cannot be earlier than start date ({start_date})."
+                )
+
+            # If renewal date is provided, check relationship with trial end date
+            if renewal_date_obj and trial_end_date_obj > renewal_date_obj:
+                print(f"Warning: Trial end date ({trial_end_date}) is after renewal date ({renewal_date}).")
+
+        return start_date, renewal_date, trial_end_date
 
     def _validate_notes(self, notes):
         """
@@ -193,7 +221,9 @@ class AddCommand(Command):
             # Validate all input fields
             cost = self._validate_cost(args.cost)
             currency = self._validate_currency(args.currency)
-            start_date, renewal_date = self._validate_dates(args.start_date, args.renewal_date)
+            start_date, renewal_date, trial_end_date = self._validate_dates(
+                args.start_date, args.renewal_date, args.trial_end_date
+            )
             notes = self._validate_notes(args.notes)
 
             # Validate name is not empty
@@ -201,16 +231,22 @@ class AddCommand(Command):
                 raise ValueError("Name cannot be empty")
 
             # Create subscription object with validated data
-            subscription = Subscription(
-                name=args.name.strip(),
-                cost=cost,
-                billing_cycle=args.billing_cycle,
-                currency=currency,
-                start_date=start_date,
-                renewal_date=renewal_date,
-                payment_method=args.payment_method.strip() if args.payment_method else '',
-                notes=notes
-            )
+            subscription_data = {
+                'name': args.name.strip(),
+                'cost': cost,
+                'billing_cycle': args.billing_cycle,
+                'currency': currency,
+                'start_date': start_date,
+                'payment_method': args.payment_method.strip() if args.payment_method else '',
+                'notes': notes,
+                'trial_end_date': trial_end_date
+            }
+
+            # Add renewal_date if provided
+            if renewal_date:
+                subscription_data['renewal_date'] = renewal_date
+
+            subscription = Subscription(**subscription_data)
 
             # Save to database
             db_manager = DatabaseManager()
@@ -224,6 +260,22 @@ class AddCommand(Command):
                 print(f"  Start Date: {start_date}")
                 print(f"  Renewal Date: {subscription.renewal_date}")
                 print(f"  Days until renewal: {subscription.days_until_renewal()}")
+
+                # Display trial information if provided
+                if trial_end_date:
+                    today = datetime.datetime.now().date()
+                    trial_end_date_obj = parse_date(trial_end_date).date()
+                    days_until_trial_end = (trial_end_date_obj - today).days
+
+                    trial_status = ""
+                    if days_until_trial_end < 0:
+                        trial_status = " (expired)"
+                    elif days_until_trial_end == 0:
+                        trial_status = " (expires today)"
+                    else:
+                        trial_status = f" ({days_until_trial_end} days remaining)"
+
+                    print(f"  Trial End Date: {trial_end_date}{trial_status}")
 
                 if args.billing_cycle == 'monthly':
                     print(f"  Annual cost: {subscription.calculate_annual_cost():.2f} {currency}")
