@@ -1,1 +1,8 @@
+
 venv/
+.idea/
+renewalradar/__pycache__/
+renewalradar/commands/__pycache__/
+renewalradar/database/__pycache__/
+renewalradar/models/__pycache__/
+renewalradar/utils/__pycache__/
