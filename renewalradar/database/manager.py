@@ -171,6 +171,53 @@ class DatabaseManager:
             conn.rollback()
             raise e
 
+    def get_filtered_subscriptions(self, filters=None, sort_by=None):
+        """Get subscriptions with optional filtering and sorting."""
+        conn, cursor = self.connect()
+
+        # Start with basic query
+        query = "SELECT * FROM subscriptions"
+        params = []
+
+        # Build WHERE clause if filters provided
+        if filters:
+            where_clauses = []
+
+            # Filter by currency
+            if "currency" in filters and filters["currency"]:
+                where_clauses.append("currency = ?")
+                params.append(filters["currency"])
+
+            # Filter by status (can be multiple)
+            if "status" in filters and filters["status"]:
+                placeholders = ",".join(["?" for _ in filters["status"]])
+                where_clauses.append(f"status IN ({placeholders})")
+                params.extend(filters["status"])
+
+            # Add any other filters here as needed
+
+            # Combine all where clauses
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
+        print
+        # Add sorting
+        if sort_by:
+            query += f" ORDER BY {sort_by}"
+
+        # Execute query
+        print(query, params)
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        # Convert rows to Subscription objects
+        subscriptions = []
+        for row in rows:
+            sub_dict = {key: row[key] for key in row.keys()}
+            subscriptions.append(sub_dict)
+
+        conn.close()
+        return subscriptions
+
     def delete_subscription(self, subscription_id):
         """
         Delete a subscription from the database.

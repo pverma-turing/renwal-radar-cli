@@ -10,6 +10,7 @@ from colorama import init, Fore, Style
 
 from renewalradar.commands.base import Command
 from renewalradar.database.manager import DatabaseManager
+from renewalradar.models.subscription import Subscription
 from renewalradar.registry import register_command
 from renewalradar.utils.date_utils import days_until_renewal, parse_date
 
@@ -68,11 +69,10 @@ class ViewCommand(Command):
         )
 
         parser.add_argument(
-            '--status',
-            choices=['all', 'upcoming', 'overdue', 'trial'],
-            default='all',
-            help='Filter subscriptions by status: all (default), upcoming (next 30 days), '
-                 'overdue, or trial (active trials)'
+            "--status",
+            nargs="*",
+            choices=Subscription.VALID_STATUSES,
+            help="Filter subscriptions by status (multiple values allowed)"
         )
 
         parser.add_argument(
@@ -107,8 +107,22 @@ class ViewCommand(Command):
         try:
             db_manager = DatabaseManager()
             try:
-                # Get all subscriptions first
-                subscriptions = db_manager.get_all_subscriptions()
+                # Build filters dictionary based on provided arguments
+                filters = {}
+
+                if args.currency:
+                    filters["currency"] = args.currency
+
+                if args.status:
+                    filters["status"] = args.status
+
+                # Get subscriptions with filters and sort
+                subscriptions = db_manager.get_filtered_subscriptions(
+                    filters=filters,
+                    sort_by=args.sort
+                )
+                # # Get all subscriptions first
+                # subscriptions = db_manager.get_all_subscriptions()
 
                 if not subscriptions:
                     print("No subscriptions found.")
@@ -119,10 +133,7 @@ class ViewCommand(Command):
 
                 # Enhance subscriptions with calculated fields and currency conversion
                 enhanced_subscriptions = self._enhance_subscriptions(subscriptions, target_currency=args.currency)
-
-                # Apply status filtering
-                filtered_subscriptions = self._filter_by_status(enhanced_subscriptions, args.status)
-
+                filtered_subscriptions = enhanced_subscriptions
                 if not filtered_subscriptions:
                     status_message = "No subscriptions found"
                     if args.status != 'all':
@@ -171,7 +182,8 @@ class ViewCommand(Command):
                             f"\nShowing first {len(limited_subscriptions)} of {total_subscription_count} subscriptions.")
 
                 # Display summary information (based on full filtered set, not the limited display set)
-                self._display_summary(filtered_subscriptions, status=args.status, target_currency=args.currency)
+                computed_status = 'all'
+                self._display_summary(filtered_subscriptions, status=computed_status, target_currency=args.currency)
                 return 0
             finally:
                 db_manager.close()
@@ -412,6 +424,7 @@ class ViewCommand(Command):
                 sub for sub in subscriptions
                 if sub["is_in_trial"]
             ]
+
 
         return subscriptions  # Fallback
 
