@@ -118,6 +118,12 @@ class ViewCommand(Command):
             help="Show total spending across subscriptions, grouped by currency"
         )
 
+        parser.add_argument(
+            "--by-status",
+            action="store_true",
+            help="When used with --total-spend, show spending breakdown by subscription status"
+        )
+
         # Display format options - make these mutually exclusive
         display_group = parser.add_mutually_exclusive_group()
 
@@ -183,6 +189,9 @@ class ViewCommand(Command):
             total_by_currency = defaultdict(float)
             annual_by_currency = defaultdict(float)
 
+            # Track spending by status and currency
+            spend_by_status_currency = defaultdict(lambda: defaultdict(float))
+
             # Process each subscription to check for expiring status
             for subscription in subscriptions:
                 # Add a display_status attribute for showing in the view
@@ -207,6 +216,10 @@ class ViewCommand(Command):
                 currency = subscription.currency
                 total_by_currency[currency] += subscription.cost
                 annual_by_currency[currency] += subscription.calculate_annual_cost()
+
+                # Track spending by status and currency
+                status = subscription.display_status  # Use the display status (with expiring logic applied)
+                spend_by_status_currency[status][currency] += subscription.cost
 
             # Prepare table data
             table_data = []
@@ -266,6 +279,10 @@ class ViewCommand(Command):
             if args.total_spend:
                 self._display_total_spend(total_by_currency, args.currency)
 
+                # If by-status breakdown is requested, show that as well
+                if args.by_status:
+                    self._display_spend_by_status(spend_by_status_currency, args.currency)
+
             # Display filter information if filters were applied
             filter_info = []
             if args.currency:
@@ -297,7 +314,7 @@ class ViewCommand(Command):
         """Display a summary of subscription statuses and upcoming renewals."""
         # Build the status summary string, only include non-zero counts
         status_parts = []
-        for status in ["active", "trial", "expiring", "cancelled"]:  # Order matters for readability
+        for status in ["active", "trial", "expiring", "canceled"]:  # Order matters for readability
             if status_counts[status] > 0:
                 status_parts.append(f"{status_counts[status]} {status}")
 
@@ -330,6 +347,43 @@ class ViewCommand(Command):
                 symbol = self._get_currency_symbol(currency)
                 print(f"  {symbol}{amount:.2f} ({currency})")
 
+    def _display_spend_by_status(self, spend_by_status_currency, target_currency=None):
+        """Display spending breakdown by subscription status."""
+        print("\nSpending by Status:")
+
+        # Order of statuses for display
+        status_order = ["active", "trial", "expiring", "canceled"]
+
+        if target_currency and target_currency in self.EXCHANGE_RATES:
+            # Convert all amounts to target currency and sum by status
+            spend_by_status = defaultdict(float)
+
+            for status, currencies in spend_by_status_currency.items():
+                for currency, amount in currencies.items():
+                    if currency in self.EXCHANGE_RATES:
+                        # Convert to USD, then to target currency
+                        amount_in_usd = amount * self.EXCHANGE_RATES[currency]
+                        amount_in_target = amount_in_usd / self.EXCHANGE_RATES[target_currency]
+                        spend_by_status[status] += amount_in_target
+
+            # Display spending by status in target currency
+            for status in status_order:
+                if status in spend_by_status and spend_by_status[status] > 0:
+                    print(f"  {status}: {self._get_currency_symbol(target_currency)}{spend_by_status[status]:.2f}")
+
+        else:
+            # Show breakdown by status and currency
+            for status in status_order:
+                if status in spend_by_status_currency and spend_by_status_currency[status]:
+                    currencies_list = []
+                    for currency, amount in sorted(spend_by_status_currency[status].items()):
+                        if amount > 0:
+                            symbol = self._get_currency_symbol(currency)
+                            currencies_list.append(f"{symbol}{amount:.2f} ({currency})")
+
+                    if currencies_list:
+                        print(f"  {status}: {', '.join(currencies_list)}")
+
     def _display_dependency_tree(self, subscriptions):
         """Display dependency tree for linked subscriptions."""
         print("\nDependency Tree:")
@@ -357,22 +411,3 @@ class ViewCommand(Command):
     def _get_currency_symbol(self, currency_code):
         """Get the symbol for a currency code."""
         return self.CURRENCY_SYMBOLS.get(currency_code, currency_code)
-
-    def _format_date_for_display(self, date_str):
-        """Format a date string for display, with days until or since current date."""
-        if not date_str:
-            return "N/A"
-
-        try:
-            date_obj = dt.strptime(date_str, "%Y-%m-%d").date()
-            current_date = dt.now().date()
-            days_diff = (date_obj - current_date).days
-
-            if days_diff > 0:
-                return f"{date_str} (in {days_diff} days)"
-            elif days_diff < 0:
-                return f"{date_str} ({abs(days_diff)} days ago)"
-            else:
-                return f"{date_str} (today)"
-        except ValueError:
-            return date_str
