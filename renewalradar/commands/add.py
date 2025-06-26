@@ -92,6 +92,12 @@ class AddCommand(Command):
             default=None,
             help='Name of the parent subscription to link this subscription to'
         )
+        parser.add_argument(
+            "--status",
+            choices=Subscription.VALID_STATUSES,
+            default="active",
+            help="Current status of subscription (default: active)"
+        )
 
     def _validate_cost(self, cost_str):
         """
@@ -283,6 +289,7 @@ class AddCommand(Command):
                     'currency': currency,
                     'start_date': start_date,
                     'payment_method': args.payment_method.strip() if args.payment_method else '',
+                    'status': args.status,
                     'notes': notes,
                     'trial_end_date': trial_end_date,
                     'parent_subscription_id': parent_subscription_id
