@@ -97,3 +97,45 @@ class ValidationRegistry:
         print("Valid tags:")
         for tag in cls.VALID_TAGS:
             print(f"  - {tag}")
+
+    @classmethod
+    def print_tags_in_use(cls, db_manager):
+        """Print list of tags currently in use.
+
+        Args:
+            db_manager: Instance of DatabaseManager
+        """
+        tags_in_use = db_manager.get_tag_usage()
+        valid_tags = set(cls.VALID_TAGS)
+
+        if not tags_in_use:
+            print("No tags currently in use.")
+            return
+
+        print("Tags currently in use:")
+        for tag, count in sorted(tags_in_use.items(), key=lambda x: (-x[1], x[0])):
+            status = "✓" if tag in valid_tags else "!"
+            print(f"  {status} {tag} ({count})")
+
+        print("\nLegend: ✓ = valid tag, ! = custom/unregistered tag")
+
+    @classmethod
+    def print_payment_methods_in_use(cls, db_manager):
+        """Print list of payment methods currently in use.
+
+        Args:
+            db_manager: Instance of DatabaseManager
+        """
+        methods_in_use = db_manager.get_payment_method_usage()
+        valid_methods = set(cls.VALID_PAYMENT_METHODS)
+
+        if not methods_in_use:
+            print("No payment methods currently in use.")
+            return
+
+        print("Payment methods currently in use:")
+        for method, count in sorted(methods_in_use.items(), key=lambda x: (-x[1], x[0])):
+            status = "✓" if method in valid_methods else "!"
+            print(f"  {status} {method} ({count})")
+
+        print("\nLegend: ✓ = valid method, ! = custom/unregistered method")

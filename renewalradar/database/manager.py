@@ -262,3 +262,50 @@ class DatabaseManager:
 
         conn.commit()
         conn.close()
+
+    def get_tag_usage(self, filters=None):
+        """Get usage counts for all tags in the database.
+
+        Args:
+            filters (dict, optional): Filters to apply before counting
+
+        Returns:
+            dict: Dictionary mapping tag names to their usage count
+        """
+        # First get all subscriptions that match our filters
+        subscriptions = self.get_filtered_subscriptions(filters)
+
+        # Count tag usage
+        tag_counts = {}
+        for sub in subscriptions:
+            for tag in sub.tags:
+                if tag in tag_counts:
+                    tag_counts[tag] += 1
+                else:
+                    tag_counts[tag] = 1
+
+        return tag_counts
+
+    def get_payment_method_usage(self, filters=None):
+        """Get usage counts for all payment methods in the database.
+
+        Args:
+            filters (dict, optional): Filters to apply before counting
+
+        Returns:
+            dict: Dictionary mapping payment method names to their usage count
+        """
+        # First get all subscriptions that match our filters
+        subscriptions = self.get_filtered_subscriptions(filters)
+
+        # Count payment method usage
+        payment_counts = {}
+        for sub in subscriptions:
+            method = sub.payment_method
+            if method:  # Skip None/empty payment methods
+                if method in payment_counts:
+                    payment_counts[method] += 1
+                else:
+                    payment_counts[method] = 1
+
+        return payment_counts
