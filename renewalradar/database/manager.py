@@ -242,3 +242,28 @@ class DatabaseManager:
         except Exception as e:
             conn.rollback()
             raise e
+
+    def get_subscription_by_name(self, name):
+        """Get a subscription by name."""
+        conn, cursor = self.connect()
+
+        cursor.execute("SELECT * FROM subscriptions WHERE name = ?", (name,))
+        row = cursor.fetchone()
+
+        if row:
+            sub_dict = {key: row[key] for key in row.keys()}
+            subscription = Subscription.from_dict(sub_dict)
+        else:
+            subscription = None
+        return subscription
+
+    def update_subscription_status(self, subscription_id, new_status):
+        """Update the status of a subscription."""
+        conn, cursor = self.connect()
+        cursor.execute(
+            "UPDATE subscriptions SET status = ? WHERE id = ?",
+            (new_status, int(subscription_id))
+        )
+
+        conn.commit()
+        conn.close()

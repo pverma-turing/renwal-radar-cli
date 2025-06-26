@@ -61,6 +61,7 @@ class Subscription:
         current_time = datetime.datetime.now().isoformat()
         self.created_at = current_time
         self.updated_at = current_time
+        self.id = None
 
     def __str__(self):
         """String representation of subscription."""
@@ -228,6 +229,8 @@ class Subscription:
             trial_end_date=data.get('trial_end_date'),
             parent_subscription_id=data.get('parent_subscription_id')
         )
+        if 'id' in data:
+            subscription.id = data['id']
 
         # Set timestamps if available
         if 'created_at' in data:
