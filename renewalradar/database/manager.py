@@ -41,79 +41,95 @@ class DatabaseManager:
             self.conn = None
             self.cursor = None
 
-    def add_subscription(self, subscription_data):
-        """
-        Add a new subscription to the database.
+    def add_subscription(self, subscription):
+        """Add a new subscription to the database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
 
-        Args:
-            subscription_data (dict): Dictionary containing subscription details
+        cursor.execute('''
+        INSERT INTO subscriptions (name, cost, billing_cycle, currency, start_date, renewal_date, 
+                                  payment_method, status, tags)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            subscription.name,
+            subscription.cost,
+            subscription.billing_cycle,
+            subscription.currency,
+            subscription.start_date,
+            subscription.renewal_date,
+            subscription.payment_method,
+            subscription.status,
+            subscription.tags_string
+        ))
 
-        Returns:
-            int: The ID of the newly created subscription
-        """
-        conn, cursor = self.connect()
+        last_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
 
-        try:
-            # Set created_at and updated_at timestamps
-            now = datetime.datetime.now().isoformat()
-            subscription_data['created_at'] = now
-            subscription_data['updated_at'] = now
-
-            # Prepare column names and placeholders for SQL query
-            columns = ', '.join(subscription_data.keys())
-            placeholders = ', '.join(['?'] * len(subscription_data))
-
-            # Prepare values in the same order as columns
-            values = list(subscription_data.values())
-
-            # Insert the new subscription
-            cursor.execute(
-                f"INSERT INTO subscriptions ({columns}) VALUES ({placeholders})",
-                values
-            )
-            conn.commit()
-
-            # Return the ID of the new subscription
-            return cursor.lastrowid
-
-        except Exception as e:
-            conn.rollback()
-            raise e
+        return last_id
 
     def get_all_subscriptions(self, sort_by=None):
-        """
-        Retrieve all subscriptions from the database.
+        """Get all subscriptions from the database."""
+        return self.get_filtered_subscriptions(filters=None, sort_by=sort_by)
 
-        Args:
-            sort_by (str, optional): The field to sort by
+    def get_filtered_subscriptions(self, filters=None, sort_by=None):
+        """Get subscriptions with optional filtering and sorting."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
 
-        Returns:
-            list: List of subscription dictionaries
-        """
-        conn, cursor = self.connect()
+        # Start with basic query
+        query = "SELECT * FROM subscriptions"
+        params = []
 
-        # Determine the ORDER BY clause based on sort_by parameter
-        order_by = ""
+        # Build WHERE clause if filters provided
+        if filters:
+            where_clauses = []
+
+            # Filter by currency
+            if "currency" in filters and filters["currency"]:
+                where_clauses.append("currency = ?")
+                params.append(filters["currency"])
+
+            # Filter by status (can be multiple)
+            if "status" in filters and filters["status"]:
+                placeholders = ",".join(["?" for _ in filters["status"]])
+                where_clauses.append(f"status IN ({placeholders})")
+                params.extend(filters["status"])
+
+            # Filter by tag (partial match in comma-separated list)
+            if "tag" in filters and filters["tag"]:
+                tag_clauses = []
+                for tag in filters["tag"]:
+                    tag_clauses.append("tags LIKE ?")
+                    params.append(f"%{tag}%")
+                if tag_clauses:
+                    where_clauses.append(f"({' OR '.join(tag_clauses)})")
+
+            # Filter by payment method
+            if "payment_method" in filters and filters["payment_method"]:
+                where_clauses.append("payment_method = ?")
+                params.append(filters["payment_method"])
+
+            # Combine all where clauses
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
+
+        # Add sorting
         if sort_by:
-            valid_fields = [
-                'name', 'cost', 'billing_cycle', 'currency',
-                'start_date', 'renewal_date', 'payment_method',
-                'created_at', 'updated_at', 'status'
-            ]
+            query += f" ORDER BY {sort_by}"
 
-            if sort_by in valid_fields:
-                order_by = f" ORDER BY {sort_by}"
-
-        # Query the database
-        cursor.execute(f"SELECT * FROM subscriptions{order_by}")
+        # Execute query
+        cursor.execute(query, params)
         rows = cursor.fetchall()
 
-        # Convert to list of dictionaries
+        # Convert rows to Subscription objects
         subscriptions = []
         for row in rows:
-            subscription = {key: row[key] for key in row.keys()}
-            subscriptions.append(subscription)
+            sub_dict = {key: row[key] for key in row.keys()}
+            subscriptions.append(Subscription.from_dict(sub_dict))
 
+        conn.close()
         return subscriptions
 
     def get_subscription_by_id(self, subscription_id):
@@ -171,57 +187,6 @@ class DatabaseManager:
         except Exception as e:
             conn.rollback()
             raise e
-
-    def get_filtered_subscriptions(self, filters=None, sort_by=None):
-        """Get subscriptions with optional filtering and sorting."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        # Start with basic query
-        query = "SELECT * FROM subscriptions"
-        params = []
-
-        # Build WHERE clause if filters provided
-        if filters:
-            where_clauses = []
-
-            # Filter by currency
-            if "currency" in filters and filters["currency"]:
-                where_clauses.append("currency = ?")
-                params.append(filters["currency"])
-
-            # Filter by status (can be multiple)
-            if "status" in filters and filters["status"]:
-                placeholders = ",".join(["?" for _ in filters["status"]])
-                where_clauses.append(f"status IN ({placeholders})")
-                params.extend(filters["status"])
-
-            # Filter by payment_method
-            if "payment_method" in filters and filters["payment_method"]:
-                where_clauses.append("payment_method = ?")
-                params.append(filters["payment_method"])
-
-            # Combine all where clauses
-            if where_clauses:
-                query += " WHERE " + " AND ".join(where_clauses)
-
-        # Add sorting
-        if sort_by:
-            query += f" ORDER BY {sort_by}"
-
-        # Execute query
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-
-        # Convert rows to Subscription objects
-        subscriptions = []
-        for row in rows:
-            sub_dict = {key: row[key] for key in row.keys()}
-            subscriptions.append(Subscription.from_dict(sub_dict))
-
-        conn.close()
-        return subscriptions
 
     def delete_subscription(self, subscription_id):
         """

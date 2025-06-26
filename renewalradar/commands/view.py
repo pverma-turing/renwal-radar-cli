@@ -130,6 +130,13 @@ class ViewCommand(Command):
             help="Flag trial subscriptions with renewal dates within the expiring threshold"
         )
 
+        parser.add_argument(
+            "--tag",
+            action="append",
+            dest="tags",
+            help="Filter subscriptions by tag. Can be used multiple times for multiple tags (OR filter)."
+        )
+
         # Display format options - make these mutually exclusive
         display_group = parser.add_mutually_exclusive_group()
 
@@ -162,6 +169,9 @@ class ViewCommand(Command):
 
             if args.payment_method:
                 filters["payment_method"] = args.payment_method
+
+            if args.tags:
+                filters["tag"] = args.tags
 
             # Get subscriptions with filters and sort
             subscriptions = db_manager.get_filtered_subscriptions(

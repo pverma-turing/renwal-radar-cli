@@ -107,6 +107,13 @@ class AddCommand(Command):
             help="Show information about valid subscription statuses"
         )
 
+        parser.add_argument(
+            "--tag",
+            action="append",
+            dest="tags",
+            help="Assign a tag to the subscription. Can be used multiple times for multiple tags."
+        )
+
     def _validate_cost(self, cost_str):
         """
         Validate that cost is a positive number.
@@ -309,7 +316,8 @@ class AddCommand(Command):
                     'status': args.status,
                     'notes': notes,
                     'trial_end_date': trial_end_date,
-                    'parent_subscription_id': parent_subscription_id
+                    'parent_subscription_id': parent_subscription_id,
+                    'tags': args.tags
                 }
 
                 # Add renewal_date if provided
