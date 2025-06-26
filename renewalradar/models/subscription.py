@@ -14,7 +14,8 @@ class Subscription:
     Class representing a subscription with validation and utility methods.
     """
 
-    VALID_BILLING_CYCLES = ['monthly', 'yearly']
+    VALID_BILLING_CYCLES = ["monthly", "quarterly", "biannual", "annual"]
+    VALID_STATUSES = ["active", "trial", "expiring", "cancelled"]
 
     def __init__(self, name, cost, billing_cycle, currency, start_date,
                  renewal_date=None, payment_method='', notes=None, status='active',
@@ -60,6 +61,21 @@ class Subscription:
         current_time = datetime.datetime.now().isoformat()
         self.created_at = current_time
         self.updated_at = current_time
+        self.id = None
+
+    def __str__(self):
+        """String representation of subscription."""
+        return f"{self.name} ({self.currency} {self.cost} {self.billing_cycle}, status: {self.status})"
+
+    @property
+    def status(self):
+        return self._status
+
+    @status.setter
+    def status(self, value):
+        if value not in self.VALID_STATUSES:
+            raise ValueError(f"Status must be one of: {', '.join(self.VALID_STATUSES)}")
+        self._status = value
 
     def set_cost(self, cost):
         """
@@ -213,6 +229,8 @@ class Subscription:
             trial_end_date=data.get('trial_end_date'),
             parent_subscription_id=data.get('parent_subscription_id')
         )
+        if 'id' in data:
+            subscription.id = data['id']
 
         # Set timestamps if available
         if 'created_at' in data:

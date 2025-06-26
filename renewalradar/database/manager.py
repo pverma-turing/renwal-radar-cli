@@ -7,6 +7,7 @@ import sqlite3
 import datetime
 from pathlib import Path
 from .schema import get_db_path, initialize_db
+from ..models.subscription import Subscription
 
 
 class DatabaseManager:
@@ -171,6 +172,57 @@ class DatabaseManager:
             conn.rollback()
             raise e
 
+    def get_filtered_subscriptions(self, filters=None, sort_by=None):
+        """Get subscriptions with optional filtering and sorting."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Start with basic query
+        query = "SELECT * FROM subscriptions"
+        params = []
+
+        # Build WHERE clause if filters provided
+        if filters:
+            where_clauses = []
+
+            # Filter by currency
+            if "currency" in filters and filters["currency"]:
+                where_clauses.append("currency = ?")
+                params.append(filters["currency"])
+
+            # Filter by status (can be multiple)
+            if "status" in filters and filters["status"]:
+                placeholders = ",".join(["?" for _ in filters["status"]])
+                where_clauses.append(f"status IN ({placeholders})")
+                params.extend(filters["status"])
+
+            # Filter by payment_method
+            if "payment_method" in filters and filters["payment_method"]:
+                where_clauses.append("payment_method = ?")
+                params.append(filters["payment_method"])
+
+            # Combine all where clauses
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
+
+        # Add sorting
+        if sort_by:
+            query += f" ORDER BY {sort_by}"
+
+        # Execute query
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        # Convert rows to Subscription objects
+        subscriptions = []
+        for row in rows:
+            sub_dict = {key: row[key] for key in row.keys()}
+            subscriptions.append(Subscription.from_dict(sub_dict))
+
+        conn.close()
+        return subscriptions
+
     def delete_subscription(self, subscription_id):
         """
         Delete a subscription from the database.
@@ -194,3 +246,28 @@ class DatabaseManager:
         except Exception as e:
             conn.rollback()
             raise e
+
+    def get_subscription_by_name(self, name):
+        """Get a subscription by name."""
+        conn, cursor = self.connect()
+
+        cursor.execute("SELECT * FROM subscriptions WHERE name = ?", (name,))
+        row = cursor.fetchone()
+
+        if row:
+            sub_dict = {key: row[key] for key in row.keys()}
+            subscription = Subscription.from_dict(sub_dict)
+        else:
+            subscription = None
+        return subscription
+
+    def update_subscription_status(self, subscription_id, new_status):
+        """Update the status of a subscription."""
+        conn, cursor = self.connect()
+        cursor.execute(
+            "UPDATE subscriptions SET status = ? WHERE id = ?",
+            (new_status, int(subscription_id))
+        )
+
+        conn.commit()
+        conn.close()
