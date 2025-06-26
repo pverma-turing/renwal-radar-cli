@@ -2,6 +2,7 @@ from renewalradar.commands.base import Command
 from renewalradar.database.manager import DatabaseManager
 from renewalradar.models.subscription import Subscription
 from renewalradar.registry import register_command
+from renewalradar.utils.status_utils import print_status_help, VALID_STATUSES, get_status_error_message
 
 
 @register_command
@@ -21,16 +22,22 @@ class UpdateStatusCommand(Command):
 
         parser.add_argument(
             "--name",
-            required=True,
+            required=False,
             help="Name of the subscription to update"
         )
 
         parser.add_argument(
             "--to",
-            required=True,
+            required=False,
             choices=Subscription.VALID_STATUSES,
             dest="new_status",
             help="New status to set (active, trial, expiring, canceled)"
+        )
+
+        parser.add_argument(
+            "--help-status",
+            action="store_true",
+            help="Show information about valid subscription statuses"
         )
 
         parser.set_defaults(func=self.execute)
@@ -39,7 +46,16 @@ class UpdateStatusCommand(Command):
     def execute(self, args):
         """Execute update-status command."""
         try:
+            # Check if help-status flag is set
+            if args.help_status:
+                print_status_help()
+                return 0
+
             db_manager = DatabaseManager()
+            # Validate status
+            if args.new_status not in VALID_STATUSES:
+                print(get_status_error_message(args.new_status))
+                return 1
             # Check if subscription exists
             subscription = db_manager.get_subscription_by_name(args.name)
             if not subscription:
