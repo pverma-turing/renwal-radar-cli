@@ -111,14 +111,14 @@ class ViewCommand(Command):
             "--payment-method",
             action="append",
             dest="payment_methods",
-            help="Filter subscriptions by payment method. Can be used multiple times for multiple payment methods."
+            help="Filter subscriptions by payment method. Can be used multiple times for multiple payment methods (OR logic between payment methods)."
         )
 
         parser.add_argument(
             "--tag",
             action="append",
             dest="tags",
-            help="Filter subscriptions by tag. Can be used multiple times for multiple tags (OR filter)."
+            help="Filter subscriptions by tag. Can be used multiple times for multiple tags (OR logic between tags)."
         )
 
         parser.add_argument(
@@ -161,6 +161,8 @@ class ViewCommand(Command):
             db_manager = DatabaseManager()
 
             # Build filters based on provided arguments
+            # Different filter types (status, tags, payment_method) will be combined with AND logic
+            # Within each filter type (multiple tags or multiple payment methods), OR logic is used
             filters = {}
 
             if args.status:
@@ -278,14 +280,22 @@ class ViewCommand(Command):
 
             # Display filter information if filters were applied
             filter_info = []
-            if args.payment_methods:
-                filter_info.append(f"payment_methods=[{', '.join(args.payment_methods)}]")
-            if args.status:
-                filter_info.append(f"status=[{', '.join(args.status)}]")
-            if args.tags:
-                filter_info.append(f"tags=[{', '.join(args.tags)}]")
-            if args.currency:
-                filter_info.append(f"currency='{args.currency}'")
+
+            # Group related filters together for clarity
+            tag_filter = f"tags=[{', '.join(args.tags)}]" if args.tags else None
+            payment_filter = f"payment_methods=[{', '.join(args.payment_methods)}]" if args.payment_methods else None
+            status_filter = f"status=[{', '.join(args.status)}]" if args.status else None
+            currency_filter = f"currency='{args.currency}'" if args.currency else None
+
+            # Combine all filters with clear indication of AND relationship
+            if tag_filter:
+                filter_info.append(tag_filter)
+            if payment_filter:
+                filter_info.append(payment_filter)
+            if status_filter:
+                filter_info.append(status_filter)
+            if currency_filter:
+                filter_info.append(currency_filter)
 
             # Add expiring days information if subscriptions were classified as expiring
             if expiring_count > 0:
@@ -294,7 +304,7 @@ class ViewCommand(Command):
                       f"(renewal within {args.expiring_days} days)")
 
             if filter_info:
-                print(f"\nFilters applied: {', '.join(filter_info)}")
+                print(f"\nFilters applied: {' AND '.join(filter_info)}")
 
             return 0
 
