@@ -76,13 +76,28 @@ class SummaryCommand(Command):
         parser.add_argument(
             "--by-tag",
             action="store_true",
-            help="Show cost breakdown by tag"
+            help="Show full cost breakdown by tag"
         )
 
         parser.add_argument(
             "--by-payment-method",
             action="store_true",
-            help="Show cost breakdown by payment method"
+            help="Show full cost breakdown by payment method"
+        )
+
+        # NEW: Top-N options
+        parser.add_argument(
+            "--top-tags",
+            type=int,
+            metavar="N",
+            help="Show top N tags by spend"
+        )
+
+        parser.add_argument(
+            "--top-payments",
+            type=int,
+            metavar="N",
+            help="Show top N payment methods by spend"
         )
 
         parser.add_argument(
@@ -93,9 +108,9 @@ class SummaryCommand(Command):
         )
 
         parser.add_argument(
-            "--include-canceled",
+            "--include-cancelled",
             action="store_true",
-            help="Include canceled subscriptions in summary (excluded by default)"
+            help="Include cancelled subscriptions in summary (excluded by default)"
         )
 
         parser.add_argument(
@@ -118,8 +133,8 @@ class SummaryCommand(Command):
 
             if args.status:
                 filters["status"] = args.status
-            elif not args.include_canceled:
-                # By default, exclude canceled subscriptions
+            elif not args.include_cancelled:
+                # By default, exclude cancelled subscriptions
                 filters["status"] = ["active", "trial", "expiring"]
 
             if args.payment_methods:
@@ -172,7 +187,15 @@ class SummaryCommand(Command):
             # Show overall summary
             self._display_overall_summary(subscriptions, status_counts, args.period, reference_currency)
 
-            # Show breakdowns if requested
+            # NEW: Show top-N tags if requested
+            if args.top_tags:
+                self._display_top_tags(subscriptions, args.period, reference_currency, args.top_tags)
+
+            # NEW: Show top-N payment methods if requested
+            if args.top_payments:
+                self._display_top_payment_methods(subscriptions, args.period, reference_currency, args.top_payments)
+
+            # Show full breakdowns if requested
             if args.by_payment_method:
                 self._display_payment_method_breakdown(subscriptions, args.period, reference_currency)
 
@@ -197,7 +220,7 @@ class SummaryCommand(Command):
 
         # Total counts by status
         status_parts = []
-        for status in ["active", "trial", "expiring", "canceled"]:
+        for status in ["active", "trial", "expiring", "cancelled"]:
             if status_counts[status] > 0:
                 status_parts.append(f"{status_counts[status]} {status}")
 
@@ -233,6 +256,57 @@ class SummaryCommand(Command):
                 cost_value = most_expensive.annual_cost
 
             print(f"Most Expensive Subscription: {most_expensive.name} ({currency} {cost_value:.2f} {period})")
+
+    def _display_top_tags(self, subscriptions, period, currency, count):
+        """Display top N tags by spend."""
+        # Skip if no tags present
+        if not any(sub.tags for sub in subscriptions):
+            return
+
+        print(f"\nTop {count} Tags:")
+
+        # Group by tag (note: subscriptions can have multiple tags)
+        tag_costs = defaultdict(float)
+
+        for sub in subscriptions:
+            # Choose cost based on period
+            cost = sub.cost if period == "monthly" else sub.annual_cost
+
+            if not sub.tags:
+                # Handle untagged subscriptions
+                tag = "Untagged"
+                tag_costs[tag] += cost
+            else:
+                # For tagged subscriptions
+                for tag in sub.tags:
+                    tag_costs[tag] += cost
+
+        # Get top N tags by spend
+        top_tags = sorted(tag_costs.items(), key=lambda x: x[1], reverse=True)[:count]
+
+        # Display as simple ranked list
+        for i, (tag, cost) in enumerate(top_tags, 1):
+            print(f"{i}. {tag:<10} – {currency} {cost:.2f}")
+
+    def _display_top_payment_methods(self, subscriptions, period, currency, count):
+        """Display top N payment methods by spend."""
+        print(f"\nTop {count} Payment Methods:")
+
+        # Group by payment method
+        payment_costs = defaultdict(float)
+
+        for sub in subscriptions:
+            method = sub.payment_method or "Unknown"
+            # Choose cost based on period
+            cost = sub.cost if period == "monthly" else sub.annual_cost
+            payment_costs[method] += cost
+
+        # Get top N payment methods by spend
+        top_methods = sorted(payment_costs.items(), key=lambda x: x[1], reverse=True)[:count]
+
+        # Display as simple ranked list
+        for i, (method, cost) in enumerate(top_methods, 1):
+            print(f"{i}. {method:<15} – {currency} {cost:.2f}")
 
     def _display_payment_method_breakdown(self, subscriptions, period, currency):
         """Display breakdown of costs by payment method."""
@@ -337,8 +411,8 @@ class SummaryCommand(Command):
 
         if args.status:
             filter_info.append(f"status=[{', '.join(args.status)}]")
-        elif not args.include_canceled:
-            filter_info.append("status=[active, trial, expiring] (canceled excluded)")
+        elif not args.include_cancelled:
+            filter_info.append("status=[active, trial, expiring] (cancelled excluded)")
 
         if args.payment_methods:
             filter_info.append(f"payment_methods=[{', '.join(args.payment_methods)}]")
@@ -349,8 +423,14 @@ class SummaryCommand(Command):
         if args.currency:
             filter_info.append(f"currency='{args.currency}'")
 
+        if args.top_tags:
+            filter_info.append(f"top-tags={args.top_tags}")
+
+        if args.top_payments:
+            filter_info.append(f"top-payments={args.top_payments}")
+
         if filter_info:
-            print(f"\nFilters applied: {', '.join(filter_info)}")
+            print(f"\nFilters applied: {' AND '.join(filter_info)}")
 
     def _is_date_within_range(self, date_str, start_date, end_date):
         """Check if a date string is within a given date range."""
