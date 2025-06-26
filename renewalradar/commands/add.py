@@ -15,6 +15,7 @@ from ..utils.date_utils import parse_date, validate_date_format
 
 from renewalradar.registry import register_command
 from ..utils.status_utils import print_status_help, VALID_STATUSES, get_status_error_message
+from ..utils.validators import ValidationRegistry
 
 
 @register_command
@@ -289,6 +290,21 @@ class AddCommand(Command):
             # Validate name is not empty
             if not args.name.strip():
                 raise ValueError("Name cannot be empty")
+
+            # Validate payment method
+            if args.payment_method:
+                try:
+                    ValidationRegistry.validate_payment_method(args.payment_method)
+                except ValueError as e:
+                    raise ValueError(str(e))
+
+            # Validate tags
+            if args.tags:
+                try:
+                    for tag in args.tags:
+                        ValidationRegistry.validate_tag(tag)
+                except ValueError as e:
+                    raise ValueError(str(e))
 
             # Create database manager
             db_manager = DatabaseManager()

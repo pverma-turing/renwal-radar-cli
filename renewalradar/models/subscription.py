@@ -7,6 +7,7 @@ import datetime
 from ..utils.date_utils import (
     parse_date, validate_date_format, calculate_next_renewal, days_until_renewal
 )
+from ..utils.validators import ValidationRegistry
 
 
 class Subscription:
@@ -127,10 +128,12 @@ class Subscription:
 
     @payment_method.setter
     def payment_method(self, value):
-        if not value:
-            self._payment_method = None
-        else:
+        # Validate payment method if provided
+        if value:
+            ValidationRegistry.validate_payment_method(value)
             self._payment_method = value
+        else:
+            self._payment_method = None
 
     @property
     def tags(self):
@@ -140,10 +143,18 @@ class Subscription:
     def tags(self, value):
         if isinstance(value, str):
             # If tags is stored as a comma-separated string, convert to list
-            self._tags = [tag.strip() for tag in value.split(',')] if value else []
+            tags_list = [tag.strip() for tag in value.split(',')] if value else []
+            # Validate each tag
+            for tag in tags_list:
+                ValidationRegistry.validate_tag(tag)
+            self._tags = tags_list
         else:
             # Otherwise, assume it's already a list or None
-            self._tags = value if value else []
+            tags_list = value if value else []
+            # Validate each tag
+            for tag in tags_list:
+                ValidationRegistry.validate_tag(tag)
+            self._tags = tags_list
 
     @property
     def tags_string(self):

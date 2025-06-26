@@ -186,39 +186,33 @@ class DatabaseManager:
             return {key: row[key] for key in row.keys()}
         return None
 
-    def update_subscription(self, subscription_id, data):
-        """
-        Update an existing subscription.
-
-        Args:
-            subscription_id (int): The ID of the subscription to update
-            data (dict): Updated subscription data
-
-        Returns:
-            bool: True if update was successful, False otherwise
-        """
+    def update_subscription(self, subscription):
+        """Update an existing subscription in the database."""
         conn, cursor = self.connect()
 
-        try:
-            # Set updated_at timestamp
-            data['updated_at'] = datetime.datetime.now().isoformat()
+        cursor.execute('''
+        UPDATE subscriptions
+        SET name = ?, cost = ?, billing_cycle = ?, currency = ?, 
+            start_date = ?, renewal_date = ?, payment_method = ?, 
+            status = ?, tags = ?
+        WHERE id = ?
+        ''', (
+            subscription.name,
+            subscription.cost,
+            subscription.billing_cycle,
+            subscription.currency,
+            subscription.start_date,
+            subscription.renewal_date,
+            subscription.payment_method,
+            subscription.status,
+            subscription.tags_string,
+            subscription.id
+        ))
 
-            # Prepare SET clause for SQL update
-            set_clause = ', '.join([f"{key} = ?" for key in data.keys()])
-            values = list(data.values())
-            values.append(subscription_id)
+        conn.commit()
+        conn.close()
 
-            # Execute the update
-            cursor.execute(
-                f"UPDATE subscriptions SET {set_clause} WHERE id = ?",
-                values
-            )
-            conn.commit()
-
-            return cursor.rowcount > 0
-        except Exception as e:
-            conn.rollback()
-            raise e
+        return cursor.rowcount > 0  # Return True if a row was updated
 
     def delete_subscription(self, subscription_id):
         """
