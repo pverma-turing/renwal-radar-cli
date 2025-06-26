@@ -3,6 +3,7 @@ from datetime import datetime as dt, timedelta
 from collections import defaultdict
 import textwrap
 from colorama import Fore, Style
+from tabulate import tabulate
 
 from renewalradar.commands.base import Command
 from renewalradar.database.manager import DatabaseManager
@@ -44,11 +45,7 @@ class SummaryCommand(Command):
     @classmethod
     def register_arguments(cls, parser):
         # Support the same filters as the view command
-        parser.add_argument(
-            "--currency",
-            help="Filter subscriptions by currency"
-        )
-
+        # Filtering options
         parser.add_argument(
             "--status",
             nargs="*",
@@ -57,21 +54,55 @@ class SummaryCommand(Command):
         )
 
         parser.add_argument(
+            "--payment-method",
+            action="append",
+            dest="payment_methods",
+            help="Filter subscriptions by payment method. Can be used multiple times."
+        )
+
+        parser.add_argument(
+            "--tag",
+            action="append",
+            dest="tags",
+            help="Filter subscriptions by tag. Can be used multiple times (OR filter)."
+        )
+
+        parser.add_argument(
+            "--currency",
+            help="Currency to use for display (default: use the currency of each subscription)"
+        )
+
+        # Breakdown options
+        parser.add_argument(
+            "--by-tag",
+            action="store_true",
+            help="Show cost breakdown by tag"
+        )
+
+        parser.add_argument(
+            "--by-payment-method",
+            action="store_true",
+            help="Show cost breakdown by payment method"
+        )
+
+        parser.add_argument(
+            "--period",
+            choices=["monthly", "annual"],
+            default="monthly",
+            help="Period for cost calculation (default: monthly)"
+        )
+
+        parser.add_argument(
+            "--include-canceled",
+            action="store_true",
+            help="Include canceled subscriptions in summary (excluded by default)"
+        )
+
+        parser.add_argument(
             "--expiring-days",
             type=int,
             default=7,
-            help="Days threshold for classifying subscriptions as expiring (default: 7)"
-        )
-
-        parser.add_argument(
-            "--payment-method",
-            help="Filter subscriptions by payment method"
-        )
-
-        parser.add_argument(
-            "--trial-warning",
-            action="store_true",
-            help="Flag trial subscriptions with renewal dates within the expiring threshold"
+            help="Days threshold for classifying active/trial subscriptions as expiring (default: 7)"
         )
 
         return parser
@@ -82,42 +113,42 @@ class SummaryCommand(Command):
             # Initialize database if it doesn't exist
             db_manager = DatabaseManager()
 
-            # Build filters dictionary based on provided arguments
+            # Build filters based on provided arguments
             filters = {}
-
-            if args.currency:
-                filters["currency"] = args.currency
 
             if args.status:
                 filters["status"] = args.status
+            elif not args.include_canceled:
+                # By default, exclude canceled subscriptions
+                filters["status"] = ["active", "trial", "expiring"]
 
-            if args.payment_method:
-                filters["payment_method"] = args.payment_method
+            if args.payment_methods:
+                filters["payment_methods"] = args.payment_methods
 
-            # Get subscriptions with filters
-            subscriptions = db_manager.get_filtered_subscriptions(filters=filters)
+            if args.tags:
+                filters["tag"] = args.tags
+
+            # Get filtered subscriptions
+            subscriptions = db_manager.get_filtered_subscriptions(filters)
 
             if not subscriptions:
-                print("No subscriptions found.")
+                print("No matching subscriptions found.")
                 return 0
 
-            # Process subscriptions for summary information
+            # Process subscriptions to classify expiring ones
             current_date = dt.now().date()
             expiring_threshold = current_date + timedelta(days=args.expiring_days)
 
-            # Initialize counters
-            status_counts = {status: 0 for status in Subscription.VALID_STATUSES}
-            status_counts["expiring"] = 0  # Add expiring which might not be in database statuses
+            # Track status counts
+            status_counts = defaultdict(int)
 
-            total_by_currency = defaultdict(float)
-            spend_by_status_currency = defaultdict(lambda: defaultdict(float))
+            # Reference currency for conversions if needed
+            reference_currency = args.currency or subscriptions[0].currency
 
-            upcoming_renewals = 0
-            trial_warning_count = 0
-
-            # Process each subscription
+            # Process each subscription to check for expiring status and count by status
             for subscription in subscriptions:
                 # Add a display_status attribute for showing in the view
+                # This doesn't change the actual status stored in the database
                 subscription.display_status = subscription.status
 
                 # Check if the subscription should be marked as expiring
@@ -125,48 +156,31 @@ class SummaryCommand(Command):
                         subscription.renewal_date and
                         self._is_date_within_range(subscription.renewal_date, current_date, expiring_threshold)):
                     subscription.display_status = "expiring"
-                    upcoming_renewals += 1
-
-                # Check for trial warning (separate from expiring logic)
-                if (subscription.status == "trial" and
-                        subscription.renewal_date and
-                        self._is_date_within_range(subscription.renewal_date, current_date, expiring_threshold)):
-                    trial_warning_count += 1
 
                 # Count by display status
                 status_counts[subscription.display_status] += 1
 
-                # Track total spending by currency
-                currency = subscription.currency
-                total_by_currency[currency] += subscription.cost
+                # Apply currency conversion if needed
+                if args.currency and subscription.currency != args.currency:
+                    # In a real app, this would use actual exchange rates
+                    # Here we'll just note that conversion would happen
+                    subscription.original_currency = subscription.currency
+                    subscription.original_cost = subscription.cost
+                    # For demo, we'll just assume a 1:1 conversion
+                    subscription.currency = args.currency
 
-                # Track spending by status and currency
-                spend_by_status_currency[subscription.display_status][currency] += subscription.cost
+            # Show overall summary
+            self._display_overall_summary(subscriptions, status_counts, args.period, reference_currency)
 
-            # Display summary
-            self._display_summary(
-                subscriptions=subscriptions,
-                status_counts=status_counts,
-                total_by_currency=total_by_currency,
-                spend_by_status_currency=spend_by_status_currency,
-                upcoming_renewals=upcoming_renewals,
-                trial_warning_count=trial_warning_count,
-                expiring_days=args.expiring_days,
-                target_currency=args.currency,
-                show_trial_warning=args.trial_warning
-            )
+            # Show breakdowns if requested
+            if args.by_payment_method:
+                self._display_payment_method_breakdown(subscriptions, args.period, reference_currency)
 
-            # Display filter information if filters were applied
-            filter_info = []
-            if args.currency:
-                filter_info.append(f"currency='{args.currency}'")
-            if args.status:
-                filter_info.append(f"status=[{', '.join(args.status)}]")
-            if args.payment_method:
-                filter_info.append(f"payment_method='{args.payment_method}'")
+            if args.by_tag:
+                self._display_tag_breakdown(subscriptions, args.period, reference_currency)
 
-            if filter_info:
-                print(f"\nFilters applied: {', '.join(filter_info)}")
+            # Display filter information
+            self._display_filter_info(args)
 
             return 0
 
@@ -174,141 +188,179 @@ class SummaryCommand(Command):
             print(f"Error: {e}")
             return 1
         except Exception as e:
-            print(f"An unexpected error occurred: {e}")
+            print(f"An error occurred: {e}")
             return 1
 
-    def _display_summary(self, subscriptions, status_counts, total_by_currency,
-                         spend_by_status_currency, upcoming_renewals, trial_warning_count,
-                         expiring_days, target_currency=None, show_trial_warning=False):
-        """Display the summary information."""
-        # Section divider
-        divider = "=" * 60
+    def _display_overall_summary(self, subscriptions, status_counts, period, currency):
+        """Display overall subscription summary."""
+        print("\n=== SUBSCRIPTION SUMMARY ===\n")
 
-        # Header
-        print(f"\n{Fore.CYAN}{Style.BRIGHT}SUBSCRIPTION PORTFOLIO SUMMARY{Style.RESET_ALL}")
-        print(divider)
-
-        # Subscription counts
-        print(f"{Fore.GREEN}Subscription Counts:{Style.RESET_ALL}")
-        print(f"  Total Subscriptions: {Fore.YELLOW}{len(subscriptions)}{Style.RESET_ALL}")
-
-        # Status counts
+        # Total counts by status
         status_parts = []
-        for status in ["active", "trial", "expiring", "cancelled"]:
+        for status in ["active", "trial", "expiring", "canceled"]:
             if status_counts[status] > 0:
-                color = self._get_status_color(status)
-                status_parts.append(f"  {status}: {color}{status_counts[status]}{Style.RESET_ALL}")
+                status_parts.append(f"{status_counts[status]} {status}")
 
         if status_parts:
-            print("  By Status:")
-            for part in status_parts:
-                print(part)
+            status_summary = ", ".join(status_parts)
+            print(f"Total Subscriptions: {sum(status_counts.values())} ({status_summary})")
 
-        print(divider)
+        # Calculate costs
+        if period == "monthly":
+            total_cost = sum(sub.cost for sub in subscriptions)
+            period_name = "Monthly"
+        else:  # annual
+            total_cost = sum(sub.annual_cost for sub in subscriptions)
+            period_name = "Annual"
 
-        # Total spend
-        print(f"{Fore.GREEN}Financial Overview:{Style.RESET_ALL}")
+        print(f"Total {period_name} Cost: {currency} {total_cost:.2f}")
 
-        if target_currency and target_currency in self.EXCHANGE_RATES:
-            # Convert all amounts to target currency
-            total_in_target = 0
-            for currency, amount in total_by_currency.items():
-                if currency in self.EXCHANGE_RATES:
-                    # First convert to USD, then to target currency
-                    amount_in_usd = amount * self.EXCHANGE_RATES[currency]
-                    amount_in_target = amount_in_usd / self.EXCHANGE_RATES[target_currency]
-                    total_in_target += amount_in_target
-
-            symbol = self._get_currency_symbol(target_currency)
-            print(
-                f"  Total Monthly Spend: {Fore.YELLOW}{symbol}{total_in_target:.2f} ({target_currency}){Style.RESET_ALL}")
-
-            # Spending by status in target currency
-            if any(status_counts.values()):
-                print("  Spend by Status:")
-                for status in ["active", "trial", "expiring", "cancelled"]:
-                    if status in spend_by_status_currency and status_counts[status] > 0:
-                        total_status_spend = 0
-                        for currency, amount in spend_by_status_currency[status].items():
-                            if currency in self.EXCHANGE_RATES:
-                                amount_in_usd = amount * self.EXCHANGE_RATES[currency]
-                                amount_in_target = amount_in_usd / self.EXCHANGE_RATES[target_currency]
-                                total_status_spend += amount_in_target
-
-                        color = self._get_status_color(status)
-                        print(f"    {status}: {color}{symbol}{total_status_spend:.2f}{Style.RESET_ALL}")
-
-        else:
-            # Show totals by currency
-            print("  Total Monthly Spend:")
-            for currency, amount in sorted(total_by_currency.items()):
-                symbol = self._get_currency_symbol(currency)
-                print(f"    {Fore.YELLOW}{symbol}{amount:.2f} ({currency}){Style.RESET_ALL}")
-
-            # Spending by status and currency (only if we have statuses with counts)
-            shown_status_header = False
-            for status in ["active", "trial", "expiring", "cancelled"]:
-                if status in spend_by_status_currency and status_counts[status] > 0:
-                    if not shown_status_header:
-                        print("  Spend by Status:")
-                        shown_status_header = True
-
-                    color = self._get_status_color(status)
-                    print(f"    {status}:")
-                    for currency, amount in sorted(spend_by_status_currency[status].items()):
-                        symbol = self._get_currency_symbol(currency)
-                        print(f"      {color}{symbol}{amount:.2f} ({currency}){Style.RESET_ALL}")
-
-        print(divider)
-
-        # Renewals section
-        print(f"{Fore.GREEN}Upcoming Activity:{Style.RESET_ALL}")
-        renewal_color = Fore.RED if upcoming_renewals > 0 else Fore.YELLOW
-        print(f"  Upcoming Renewals: {renewal_color}{upcoming_renewals} in next {expiring_days} days{Style.RESET_ALL}")
-
-        # Add trial warning if requested and applicable
-        if show_trial_warning and trial_warning_count > 0:
-            print(
-                f"  {Fore.YELLOW}Trial Ending Soon: {trial_warning_count} subscription(s) in next {expiring_days} days{Style.RESET_ALL}")
-
-        # Calculate average cost if possible
-        if len(subscriptions) > 0:
-            if target_currency and target_currency in self.EXCHANGE_RATES:
-                avg_cost = total_in_target / len(subscriptions)
-                symbol = self._get_currency_symbol(target_currency)
-                print(f"  Average Subscription Cost: {Fore.YELLOW}{symbol}{avg_cost:.2f}{Style.RESET_ALL}")
+        # Average cost
+        if subscriptions:
+            if period == "monthly":
+                avg_cost = total_cost / len(subscriptions)
             else:
-                # If more than one currency, don't show average
-                if len(total_by_currency) == 1:
-                    currency = list(total_by_currency.keys())[0]
-                    avg_cost = total_by_currency[currency] / len(subscriptions)
-                    symbol = self._get_currency_symbol(currency)
-                    print(f"  Average Subscription Cost: {Fore.YELLOW}{symbol}{avg_cost:.2f}{Style.RESET_ALL}")
+                avg_cost = total_cost / len(subscriptions)
+            print(f"Average {period_name} Cost per Subscription: {currency} {avg_cost:.2f}")
+
+        # Most expensive subscription
+        if subscriptions:
+            if period == "monthly":
+                most_expensive = max(subscriptions, key=lambda x: x.cost)
+                cost_value = most_expensive.cost
+            else:
+                most_expensive = max(subscriptions, key=lambda x: x.annual_cost)
+                cost_value = most_expensive.annual_cost
+
+            print(f"Most Expensive Subscription: {most_expensive.name} ({currency} {cost_value:.2f} {period})")
+
+    def _display_payment_method_breakdown(self, subscriptions, period, currency):
+        """Display breakdown of costs by payment method."""
+        print("\n=== BREAKDOWN BY PAYMENT METHOD ===\n")
+
+        # Group by payment method
+        payment_method_costs = defaultdict(float)
+        payment_method_counts = defaultdict(int)
+
+        for sub in subscriptions:
+            method = sub.payment_method or "Unknown"
+            payment_method_counts[method] += 1
+
+            if period == "monthly":
+                payment_method_costs[method] += sub.cost
+            else:
+                payment_method_costs[method] += sub.annual_cost
+
+        if not payment_method_costs:
+            print("No payment method data available.")
+            return
+
+        # Prepare data for display
+        table_data = []
+        total_cost = sum(payment_method_costs.values())
+
+        for method, cost in sorted(payment_method_costs.items(), key=lambda x: x[1], reverse=True):
+            count = payment_method_counts[method]
+            percentage = (cost / total_cost * 100) if total_cost > 0 else 0
+            table_data.append([
+                method,
+                count,
+                f"{currency} {cost:.2f}",
+                f"{percentage:.1f}%"
+            ])
+
+        # Add total row
+        table_data.append([
+            "TOTAL",
+            sum(payment_method_counts.values()),
+            f"{currency} {total_cost:.2f}",
+            "100.0%"
+        ])
+
+        # Display table
+        headers = ["Payment Method", "Count", f"{period.capitalize()} Cost", "% of Total"]
+        print(tabulate(table_data, headers=headers, tablefmt="grid"))
+
+    def _display_tag_breakdown(self, subscriptions, period, currency):
+        """Display breakdown of costs by tag."""
+        print("\n=== BREAKDOWN BY TAG ===\n")
+
+        # Group by tag (note: subscriptions can have multiple tags)
+        tag_costs = defaultdict(float)
+        tag_counts = defaultdict(int)
+
+        for sub in subscriptions:
+            if not sub.tags:
+                # Handle untagged subscriptions
+                tag = "Untagged"
+                tag_counts[tag] += 1
+                if period == "monthly":
+                    tag_costs[tag] += sub.cost
                 else:
-                    print("  Average Subscription Cost: (multiple currencies)")
+                    tag_costs[tag] += sub.annual_cost
+            else:
+                # For tagged subscriptions, distribute cost across all tags
+                # This means the sum of tag costs will be higher than total cost
+                # if subscriptions have multiple tags
+                for tag in sub.tags:
+                    tag_counts[tag] += 1
+                    if period == "monthly":
+                        tag_costs[tag] += sub.cost
+                    else:
+                        tag_costs[tag] += sub.annual_cost
+
+        if not tag_costs:
+            print("No tag data available.")
+            return
+
+        # Prepare data for display
+        table_data = []
+        # Note: We don't calculate percentage here because tag costs can sum to more than
+        # total cost due to multiple tags per subscription
+
+        for tag, cost in sorted(tag_costs.items(), key=lambda x: x[1], reverse=True):
+            count = tag_counts[tag]
+            table_data.append([
+                tag,
+                count,
+                f"{currency} {cost:.2f}"
+            ])
+
+        # Display table with note
+        headers = ["Tag", "Count", f"{period.capitalize()} Cost"]
+        print(tabulate(table_data, headers=headers, tablefmt="grid"))
+        print("\nNote: Subscriptions with multiple tags are counted in each applicable category.")
+
+    def _display_filter_info(self, args):
+        """Display information about active filters."""
+        filter_info = []
+
+        if args.status:
+            filter_info.append(f"status=[{', '.join(args.status)}]")
+        elif not args.include_canceled:
+            filter_info.append("status=[active, trial, expiring] (canceled excluded)")
+
+        if args.payment_methods:
+            filter_info.append(f"payment_methods=[{', '.join(args.payment_methods)}]")
+
+        if args.tags:
+            filter_info.append(f"tags=[{', '.join(args.tags)}]")
+
+        if args.currency:
+            filter_info.append(f"currency='{args.currency}'")
+
+        if filter_info:
+            print(f"\nFilters applied: {', '.join(filter_info)}")
 
     def _is_date_within_range(self, date_str, start_date, end_date):
         """Check if a date string is within a given date range."""
         try:
+            from datetime import datetime, timedelta
             # Parse the date string (assuming YYYY-MM-DD format)
-            date_obj = dt.strptime(date_str, "%Y-%m-%d").date()
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
 
             # Check if date is in range [start_date, end_date]
             return start_date <= date_obj <= end_date
         except (ValueError, TypeError):
             # Return False if date is invalid
             return False
-
-    def _get_currency_symbol(self, currency_code):
-        """Get the symbol for a currency code."""
-        return self.CURRENCY_SYMBOLS.get(currency_code, currency_code)
-
-    def _get_status_color(self, status):
-        """Return appropriate color for a subscription status."""
-        colors = {
-            "active": Fore.GREEN,
-            "trial": Fore.BLUE,
-            "expiring": Fore.RED,
-            "cancelled": Fore.YELLOW
-        }
-        return colors.get(status, Fore.WHITE)
