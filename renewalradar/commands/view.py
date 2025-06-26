@@ -8,7 +8,7 @@ import shutil
 
 from colorama import init, Fore, Style
 from tabulate import tabulate
-
+from datetime import datetime as dt
 from renewalradar.commands.base import Command
 from renewalradar.database.manager import DatabaseManager
 from renewalradar.models.subscription import Subscription
@@ -138,11 +138,18 @@ class ViewCommand(Command):
                 return 0
 
             # Process subscriptions to classify expiring ones
-            current_date = datetime.datetime.now().date()
+            current_date = dt.now().date()
             expiring_threshold = current_date + datetime.timedelta(days=args.expiring_days)
 
             # Track how many subscriptions were classified as expiring
             expiring_count = 0
+
+            # Initialize counters for status summary
+            status_counts = {status: 0 for status in Subscription.VALID_STATUSES}
+            status_counts["expiring"] = 0  # Add expiring which might not be in database statuses
+
+            # Track upcoming renewals
+            upcoming_renewals = 0
 
             # Process each subscription to check for expiring status
             for subscription in subscriptions:
@@ -157,6 +164,13 @@ class ViewCommand(Command):
                     subscription.display_status = "expiring"
                     expiring_count += 1
 
+                    # Count this as an upcoming renewal
+                    upcoming_renewals += 1
+
+                # Count by display status for summary
+                if subscription.display_status in status_counts:
+                    status_counts[subscription.display_status] += 1
+
             # Prepare table data
             table_data = []
             for sub in subscriptions:
@@ -165,7 +179,7 @@ class ViewCommand(Command):
                 # Add days until renewal if the status is expiring
                 if status_display == "expiring" and sub.renewal_date:
                     try:
-                        renewal_date = datetime.datetime.strptime(sub.renewal_date, "%Y-%m-%d").date()
+                        renewal_date = dt.strptime(sub.renewal_date, "%Y-%m-%d").date()
                         days_until_renewal = (renewal_date - current_date).days
                         status_display = f"expiring ({days_until_renewal} days)"
                     except (ValueError, TypeError):
@@ -190,14 +204,17 @@ class ViewCommand(Command):
 
             # Display summary
             total_cost = sum(sub.cost for sub in subscriptions)
-            # annual_cost = sum(sub.annual_cost for sub in subscriptions)
+            annual_cost = sum(sub.calculate_annual_cost() for sub in subscriptions)
 
             print(f"\nTotal Monthly Cost: {subscriptions[0].currency} {total_cost:.2f}")
-            # print(f"Total Annual Cost: {subscriptions[0].currency} {annual_cost:.2f}")
+            print(f"Total Annual Cost: {subscriptions[0].currency} {annual_cost:.2f}")
 
             # Show dependency tree if requested
             if args.show_dependency_tree:
                 self._display_dependency_tree(subscriptions)
+
+            # Display status summary after the main output
+            self._display_status_summary(status_counts, upcoming_renewals, args.expiring_days)
 
             # Display filter information if filters were applied
             filter_info = []
@@ -224,6 +241,20 @@ class ViewCommand(Command):
             print(f"An error occurred: {e}")
             return 1
 
+    def _display_status_summary(self, status_counts, upcoming_renewals, expiring_days):
+        """Display a summary of subscription statuses and upcoming renewals."""
+        # Build the status summary string, only include non-zero counts
+        status_parts = []
+        for status in ["active", "trial", "expiring", "cancelled"]:  # Order matters for readability
+            if status_counts[status] > 0:
+                status_parts.append(f"{status_counts[status]} {status}")
+
+        # Only display if we have any subscriptions
+        if status_parts:
+            status_summary = ", ".join(status_parts)
+            print(f"\nSummary: {status_summary}")
+            print(f"Upcoming Renewals: {upcoming_renewals} in next {expiring_days} days")
+
     def _display_dependency_tree(self, subscriptions):
         """Display dependency tree for linked subscriptions."""
         print("\nDependency Tree:")
@@ -240,7 +271,7 @@ class ViewCommand(Command):
         """Check if a date string is within a given date range."""
         try:
             # Parse the date string (assuming YYYY-MM-DD format)
-            date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+            date_obj = dt.strptime(date_str, "%Y-%m-%d").date()
 
             # Check if date is in range [start_date, end_date]
             return start_date <= date_obj <= end_date
@@ -254,8 +285,8 @@ class ViewCommand(Command):
             return "N/A"
 
         try:
-            date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
-            current_date = datetime.datetime.now().date()
+            date_obj = dt.strptime(date_str, "%Y-%m-%d").date()
+            current_date = dt.now().date()
             days_diff = (date_obj - current_date).days
 
             if days_diff > 0:
