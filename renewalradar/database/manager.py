@@ -7,6 +7,7 @@ import sqlite3
 import datetime
 from pathlib import Path
 from .schema import get_db_path, initialize_db
+from ..models.subscription import Subscription
 
 
 class DatabaseManager:
@@ -213,7 +214,7 @@ class DatabaseManager:
         subscriptions = []
         for row in rows:
             sub_dict = {key: row[key] for key in row.keys()}
-            subscriptions.append(sub_dict)
+            subscriptions.append(Subscription.from_dict(sub_dict) )
 
         conn.close()
         return subscriptions
