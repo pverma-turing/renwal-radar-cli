@@ -314,7 +314,7 @@ class ViewCommand(Command):
         """Display a summary of subscription statuses and upcoming renewals."""
         # Build the status summary string, only include non-zero counts
         status_parts = []
-        for status in ["active", "trial", "expiring", "canceled"]:  # Order matters for readability
+        for status in ["active", "trial", "expiring", "cancelled"]:  # Order matters for readability
             if status_counts[status] > 0:
                 status_parts.append(f"{status_counts[status]} {status}")
 
