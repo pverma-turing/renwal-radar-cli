@@ -43,8 +43,7 @@ class DatabaseManager:
 
     def add_subscription(self, subscription):
         """Add a new subscription to the database."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        conn, cursor = self.connect()
 
         cursor.execute('''
         INSERT INTO subscriptions (name, cost, billing_cycle, currency, start_date, renewal_date, 
@@ -74,9 +73,7 @@ class DatabaseManager:
 
     def get_filtered_subscriptions(self, filters=None, sort_by=None):
         """Get subscriptions with optional filtering and sorting."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        conn, cursor = self.connect()
 
         # Start with basic query
         query = "SELECT * FROM subscriptions"
@@ -106,8 +103,13 @@ class DatabaseManager:
                 if tag_clauses:
                     where_clauses.append(f"({' OR '.join(tag_clauses)})")
 
-            # Filter by payment method
-            if "payment_method" in filters and filters["payment_method"]:
+            # Filter by payment method (can be multiple)
+            if "payment_methods" in filters and filters["payment_methods"]:
+                placeholders = ",".join(["?" for _ in filters["payment_methods"]])
+                where_clauses.append(f"payment_method IN ({placeholders})")
+                params.extend(filters["payment_methods"])
+            elif "payment_method" in filters and filters["payment_method"]:
+                # For backwards compatibility
                 where_clauses.append("payment_method = ?")
                 params.append(filters["payment_method"])
 
@@ -131,6 +133,36 @@ class DatabaseManager:
 
         conn.close()
         return subscriptions
+
+    def get_distinct_values(self, column):
+        """Get a list of distinct values from a specific column."""
+        conn, cursor = self.connect()
+
+        query = f"SELECT DISTINCT {column} FROM subscriptions WHERE {column} IS NOT NULL AND {column} != ''"
+        cursor.execute(query)
+
+        result = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+        return result
+
+    def get_all_tags(self):
+        """Get a list of all unique tags across all subscriptions."""
+        conn, cursor = self.connect()
+
+        query = "SELECT tags FROM subscriptions WHERE tags IS NOT NULL AND tags != ''"
+        cursor.execute(query)
+
+        all_tag_strings = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+        # Process all tag strings and create a unique set
+        unique_tags = set()
+        for tag_string in all_tag_strings:
+            tags = [tag.strip() for tag in tag_string.split(',')]
+            unique_tags.update(tags)
+
+        return sorted(list(unique_tags))
 
     def get_subscription_by_id(self, subscription_id):
         """
