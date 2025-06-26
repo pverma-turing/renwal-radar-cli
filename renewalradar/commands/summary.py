@@ -68,6 +68,12 @@ class SummaryCommand(Command):
             help="Filter subscriptions by payment method"
         )
 
+        parser.add_argument(
+            "--trial-warning",
+            action="store_true",
+            help="Flag trial subscriptions with renewal dates within the expiring threshold"
+        )
+
         return parser
 
     def execute(self, args):
@@ -107,6 +113,7 @@ class SummaryCommand(Command):
             spend_by_status_currency = defaultdict(lambda: defaultdict(float))
 
             upcoming_renewals = 0
+            trial_warning_count = 0
 
             # Process each subscription
             for subscription in subscriptions:
@@ -119,6 +126,12 @@ class SummaryCommand(Command):
                         self._is_date_within_range(subscription.renewal_date, current_date, expiring_threshold)):
                     subscription.display_status = "expiring"
                     upcoming_renewals += 1
+
+                # Check for trial warning (separate from expiring logic)
+                if (subscription.status == "trial" and
+                        subscription.renewal_date and
+                        self._is_date_within_range(subscription.renewal_date, current_date, expiring_threshold)):
+                    trial_warning_count += 1
 
                 # Count by display status
                 status_counts[subscription.display_status] += 1
@@ -137,8 +150,10 @@ class SummaryCommand(Command):
                 total_by_currency=total_by_currency,
                 spend_by_status_currency=spend_by_status_currency,
                 upcoming_renewals=upcoming_renewals,
+                trial_warning_count=trial_warning_count,
                 expiring_days=args.expiring_days,
-                target_currency=args.currency
+                target_currency=args.currency,
+                show_trial_warning=args.trial_warning
             )
 
             # Display filter information if filters were applied
@@ -163,8 +178,8 @@ class SummaryCommand(Command):
             return 1
 
     def _display_summary(self, subscriptions, status_counts, total_by_currency,
-                         spend_by_status_currency, upcoming_renewals, expiring_days,
-                         target_currency=None):
+                         spend_by_status_currency, upcoming_renewals, trial_warning_count,
+                         expiring_days, target_currency=None, show_trial_warning=False):
         """Display the summary information."""
         # Section divider
         divider = "=" * 60
@@ -250,6 +265,11 @@ class SummaryCommand(Command):
         print(f"{Fore.GREEN}Upcoming Activity:{Style.RESET_ALL}")
         renewal_color = Fore.RED if upcoming_renewals > 0 else Fore.YELLOW
         print(f"  Upcoming Renewals: {renewal_color}{upcoming_renewals} in next {expiring_days} days{Style.RESET_ALL}")
+
+        # Add trial warning if requested and applicable
+        if show_trial_warning and trial_warning_count > 0:
+            print(
+                f"  {Fore.YELLOW}Trial Ending Soon: {trial_warning_count} subscription(s) in next {expiring_days} days{Style.RESET_ALL}")
 
         # Calculate average cost if possible
         if len(subscriptions) > 0:

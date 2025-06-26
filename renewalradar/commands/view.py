@@ -124,6 +124,12 @@ class ViewCommand(Command):
             help="When used with --total-spend, show spending breakdown by subscription status"
         )
 
+        parser.add_argument(
+            "--trial-warning",
+            action="store_true",
+            help="Flag trial subscriptions with renewal dates within the expiring threshold"
+        )
+
         # Display format options - make these mutually exclusive
         display_group = parser.add_mutually_exclusive_group()
 
@@ -171,12 +177,15 @@ class ViewCommand(Command):
                 print("No subscriptions found.")
                 return 0
 
-            # Process subscriptions to classify expiring ones
+            # Process subscriptions to classify expiring ones and track trial warnings
             current_date = dt.now().date()
             expiring_threshold = current_date + datetime.timedelta(days=args.expiring_days)
 
             # Track how many subscriptions were classified as expiring
             expiring_count = 0
+
+            # Track trial subscriptions with renewal dates in the expiring window
+            trial_warning_count = 0
 
             # Initialize counters for status summary
             status_counts = {status: 0 for status in Subscription.VALID_STATUSES}
@@ -192,7 +201,7 @@ class ViewCommand(Command):
             # Track spending by status and currency
             spend_by_status_currency = defaultdict(lambda: defaultdict(float))
 
-            # Process each subscription to check for expiring status
+            # Process each subscription to check for expiring status and trial warnings
             for subscription in subscriptions:
                 # Add a display_status attribute for showing in the view
                 # This doesn't change the actual status stored in the database
@@ -208,6 +217,16 @@ class ViewCommand(Command):
                     # Count this as an upcoming renewal
                     upcoming_renewals += 1
 
+                # Check for trial warning (separate from expiring logic)
+                if (subscription.status == "trial" and
+                        subscription.renewal_date and
+                        self._is_date_within_range(subscription.renewal_date, current_date, expiring_threshold)):
+                    # Add a flag for trial warning
+                    subscription.trial_warning = True
+                    trial_warning_count += 1
+                else:
+                    subscription.trial_warning = False
+
                 # Count by display status for summary
                 if subscription.display_status in status_counts:
                     status_counts[subscription.display_status] += 1
@@ -218,8 +237,7 @@ class ViewCommand(Command):
                 annual_by_currency[currency] += subscription.calculate_annual_cost()
 
                 # Track spending by status and currency
-                status = subscription.display_status  # Use the display status (with expiring logic applied)
-                spend_by_status_currency[status][currency] += subscription.cost
+                spend_by_status_currency[subscription.display_status][currency] += subscription.cost
 
             # Prepare table data
             table_data = []
@@ -235,6 +253,16 @@ class ViewCommand(Command):
                     except (ValueError, TypeError):
                         # In case of invalid date format
                         pass
+
+                # Add trial warning indicator if requested and applicable
+                if args.trial_warning and sub.trial_warning:
+                    try:
+                        renewal_date = dt.strptime(sub.renewal_date, "%Y-%m-%d").date()
+                        days_until_renewal = (renewal_date - current_date).days
+                        status_display += f" {Fore.YELLOW}⚠️ TRIAL ENDING SOON ({days_until_renewal} days){Style.RESET_ALL}"
+                    except (ValueError, TypeError):
+                        # In case of invalid date format
+                        status_display += f" {Fore.YELLOW}⚠️ TRIAL ENDING SOON{Style.RESET_ALL}"
 
                 table_data.append([
                     sub.name,
@@ -274,6 +302,11 @@ class ViewCommand(Command):
 
             # Display status summary after the main output
             self._display_status_summary(status_counts, upcoming_renewals, args.expiring_days)
+
+            # Display trial warning summary if requested and applicable
+            if args.trial_warning and trial_warning_count > 0:
+                print(
+                    f"{Fore.YELLOW}Trial Ending Soon: {trial_warning_count} subscription(s) in next {args.expiring_days} days{Style.RESET_ALL}")
 
             # Display total spend if requested
             if args.total_spend:
@@ -392,7 +425,14 @@ class ViewCommand(Command):
         # this would display an actual dependency hierarchy
         for sub in subscriptions:
             # Use display_status for consistency with table view
-            print(f"- {sub.name} ({sub.display_status})")
+            status_display = sub.display_status
+
+            # Add trial warning if applicable
+            trial_warning = ""
+            if hasattr(sub, 'trial_warning') and sub.trial_warning:
+                trial_warning = f" {Fore.YELLOW}⚠️ TRIAL ENDING SOON{Style.RESET_ALL}"
+
+            print(f"- {sub.name} ({status_display}{trial_warning})")
 
         print("(Full dependency tree functionality not implemented in this example)")
 
