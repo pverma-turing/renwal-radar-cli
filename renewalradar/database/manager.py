@@ -174,7 +174,9 @@ class DatabaseManager:
 
     def get_filtered_subscriptions(self, filters=None, sort_by=None):
         """Get subscriptions with optional filtering and sorting."""
-        conn, cursor = self.connect()
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
 
         # Start with basic query
         query = "SELECT * FROM subscriptions"
@@ -195,18 +197,20 @@ class DatabaseManager:
                 where_clauses.append(f"status IN ({placeholders})")
                 params.extend(filters["status"])
 
-            # Add any other filters here as needed
+            # Filter by payment_method
+            if "payment_method" in filters and filters["payment_method"]:
+                where_clauses.append("payment_method = ?")
+                params.append(filters["payment_method"])
 
             # Combine all where clauses
             if where_clauses:
                 query += " WHERE " + " AND ".join(where_clauses)
-        print
+
         # Add sorting
         if sort_by:
             query += f" ORDER BY {sort_by}"
 
         # Execute query
-        print(query, params)
         cursor.execute(query, params)
         rows = cursor.fetchall()
 
@@ -214,7 +218,7 @@ class DatabaseManager:
         subscriptions = []
         for row in rows:
             sub_dict = {key: row[key] for key in row.keys()}
-            subscriptions.append(Subscription.from_dict(sub_dict) )
+            subscriptions.append(Subscription.from_dict(sub_dict))
 
         conn.close()
         return subscriptions

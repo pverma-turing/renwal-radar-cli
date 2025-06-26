@@ -5,6 +5,7 @@ Handles displaying subscriptions from the command line.
 
 import datetime
 import shutil
+from collections import defaultdict
 
 from colorama import init, Fore, Style
 from tabulate import tabulate
@@ -17,6 +18,8 @@ from renewalradar.utils.date_utils import days_until_renewal, parse_date
 
 # Initialize colorama for cross-platform color support
 init()
+
+
 @register_command
 class ViewCommand(Command):
     """Command to view subscriptions with enhanced formatting and filtering."""
@@ -58,6 +61,17 @@ class ViewCommand(Command):
         'CNY': 6.39,
         'HKD': 7.78,
         # Add more currencies as needed
+    },
+    # Currency symbols for display
+    CURRENCY_SYMBOLS = {
+        "USD": "$",
+        "EUR": "€",
+        "GBP": "£",
+        "INR": "₹",
+        "JPY": "¥",
+        "CAD": "C$",
+        "AUD": "A$",
+        "CNY": "¥"
     }
 
     @classmethod
@@ -93,6 +107,17 @@ class ViewCommand(Command):
             help="Days threshold for classifying active/trial subscriptions as expiring (default: 7)"
         )
 
+        parser.add_argument(
+            "--payment-method",
+            help="Filter subscriptions by payment method"
+        )
+
+        parser.add_argument(
+            "--total-spend",
+            action="store_true",
+            help="Show total spending across subscriptions, grouped by currency"
+        )
+
         # Display format options - make these mutually exclusive
         display_group = parser.add_mutually_exclusive_group()
 
@@ -111,8 +136,8 @@ class ViewCommand(Command):
     def execute(self, args):
         """Execute view command."""
         try:
-            db_manager = DatabaseManager()
             # Initialize database if it doesn't exist
+            db_manager = DatabaseManager()
 
             # Build filters dictionary based on provided arguments
             filters = {}
@@ -122,6 +147,9 @@ class ViewCommand(Command):
 
             if args.status:
                 filters["status"] = args.status
+
+            if args.payment_method:
+                filters["payment_method"] = args.payment_method
 
             # Get subscriptions with filters and sort
             subscriptions = db_manager.get_filtered_subscriptions(
@@ -151,6 +179,10 @@ class ViewCommand(Command):
             # Track upcoming renewals
             upcoming_renewals = 0
 
+            # Track spending by currency
+            total_by_currency = defaultdict(float)
+            annual_by_currency = defaultdict(float)
+
             # Process each subscription to check for expiring status
             for subscription in subscriptions:
                 # Add a display_status attribute for showing in the view
@@ -171,6 +203,11 @@ class ViewCommand(Command):
                 if subscription.display_status in status_counts:
                     status_counts[subscription.display_status] += 1
 
+                # Track total spending by currency
+                currency = subscription.currency
+                total_by_currency[currency] += subscription.cost
+                annual_by_currency[currency] += subscription.calculate_annual_cost()
+
             # Prepare table data
             table_data = []
             for sub in subscriptions:
@@ -188,7 +225,7 @@ class ViewCommand(Command):
 
                 table_data.append([
                     sub.name,
-                    f"{sub.currency} {sub.cost:.2f}",
+                    f"{self._get_currency_symbol(sub.currency)}{sub.cost:.2f}",
                     sub.billing_cycle,
                     sub.start_date or "N/A",
                     sub.renewal_date or "N/A",
@@ -202,12 +239,21 @@ class ViewCommand(Command):
             # Display table
             print(tabulate(table_data, headers=headers, tablefmt="grid"))
 
-            # Display summary
-            total_cost = sum(sub.cost for sub in subscriptions)
-            annual_cost = sum(sub.calculate_annual_cost() for sub in subscriptions)
-
-            print(f"\nTotal Monthly Cost: {subscriptions[0].currency} {total_cost:.2f}")
-            print(f"Total Annual Cost: {subscriptions[0].currency} {annual_cost:.2f}")
+            # Display standard summary (monthly and annual cost)
+            if subscriptions:
+                # If we have a filter by currency, show only that currency
+                if args.currency:
+                    print(
+                        f"\nTotal Monthly Cost: {self._get_currency_symbol(args.currency)}{total_by_currency.get(args.currency, 0):.2f}")
+                    print(
+                        f"Total Annual Cost: {self._get_currency_symbol(args.currency)}{annual_by_currency.get(args.currency, 0):.2f}")
+                # Otherwise show for the first subscription's currency (common case)
+                elif subscriptions:
+                    main_currency = subscriptions[0].currency
+                    print(
+                        f"\nTotal Monthly Cost: {self._get_currency_symbol(main_currency)}{total_by_currency[main_currency]:.2f}")
+                    print(
+                        f"Total Annual Cost: {self._get_currency_symbol(main_currency)}{annual_by_currency[main_currency]:.2f}")
 
             # Show dependency tree if requested
             if args.show_dependency_tree:
@@ -216,12 +262,18 @@ class ViewCommand(Command):
             # Display status summary after the main output
             self._display_status_summary(status_counts, upcoming_renewals, args.expiring_days)
 
+            # Display total spend if requested
+            if args.total_spend:
+                self._display_total_spend(total_by_currency, args.currency)
+
             # Display filter information if filters were applied
             filter_info = []
             if args.currency:
                 filter_info.append(f"currency='{args.currency}'")
             if args.status:
                 filter_info.append(f"status=[{', '.join(args.status)}]")
+            if args.payment_method:
+                filter_info.append(f"payment_method='{args.payment_method}'")
 
             # Add expiring days information if subscriptions were classified as expiring
             if expiring_count > 0:
@@ -255,6 +307,29 @@ class ViewCommand(Command):
             print(f"\nSummary: {status_summary}")
             print(f"Upcoming Renewals: {upcoming_renewals} in next {expiring_days} days")
 
+    def _display_total_spend(self, total_by_currency, target_currency=None):
+        """Display total spending across subscriptions, optionally converted to a target currency."""
+        print("\nTotal Spend:")
+
+        if target_currency and target_currency in self.EXCHANGE_RATES:
+            # If a target currency is specified, convert all amounts to that currency
+            total_in_target = 0
+            for currency, amount in total_by_currency.items():
+                # Convert from original currency to target currency
+                if currency in self.EXCHANGE_RATES:
+                    # First convert to USD, then to target currency
+                    amount_in_usd = amount * self.EXCHANGE_RATES[currency]
+                    amount_in_target = amount_in_usd / self.EXCHANGE_RATES[target_currency]
+                    total_in_target += amount_in_target
+
+            print(f"  {self._get_currency_symbol(target_currency)}{total_in_target:.2f} ({target_currency})")
+
+        else:
+            # Show totals grouped by currency
+            for currency, amount in sorted(total_by_currency.items()):
+                symbol = self._get_currency_symbol(currency)
+                print(f"  {symbol}{amount:.2f} ({currency})")
+
     def _display_dependency_tree(self, subscriptions):
         """Display dependency tree for linked subscriptions."""
         print("\nDependency Tree:")
@@ -278,6 +353,10 @@ class ViewCommand(Command):
         except (ValueError, TypeError):
             # Return False if date is invalid
             return False
+
+    def _get_currency_symbol(self, currency_code):
+        """Get the symbol for a currency code."""
+        return self.CURRENCY_SYMBOLS.get(currency_code, currency_code)
 
     def _format_date_for_display(self, date_str):
         """Format a date string for display, with days until or since current date."""
