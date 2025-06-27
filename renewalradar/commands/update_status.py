@@ -45,6 +45,24 @@ class UpdateStatusCommand(Command):
             help="Add a tag to the subscription. Can be used multiple times."
         )
 
+        # Update options
+        parser.add_argument(
+            "--set-status",
+            choices=Subscription.VALID_STATUSES,
+            help="Set new status for the subscription"
+        )
+
+        parser.add_argument(
+            "--set-payment-method",
+            help="Set new payment method for the subscription"
+        )
+
+        parser.add_argument(
+            "--set-tags",
+            nargs="+",
+            help="Set completely new tags for the subscription (replaces all existing tags)"
+        )
+
         parser.add_argument(
             "--remove-tag",
             action="append",
@@ -82,15 +100,16 @@ class UpdateStatusCommand(Command):
                 return 0
 
             # Check if any update was specified
-            if not (args.status or args.payment_method or args.add_tags or args.remove_tags):
+            if not (args.status or args.payment_method or args.add_tags or args.remove_tags
+                    or args.set_status or args.set_payment_method or args.set_tags):
                 raise ValueError(
-                    "No update specified. Please provide at least one of: --status, --payment-method, --add-tag, --remove-tag")
+                    "No update specified. Please provide at least one of: --status, --payment-method, --add-tag, "
+                    "--remove-tag", "--set-status", "--set-payment-method", "--set-tags")
 
             # Get the subscription to update
             subscription = self._get_subscription(args.subscription_id)
             if not subscription:
                 raise ValueError(f"Subscription with ID {args.subscription_id} not found.")
-
             # Track changes for user feedback
             changes = []
 
@@ -125,6 +144,38 @@ class UpdateStatusCommand(Command):
 
                     if set(subscription.tags) != old_tags:
                         changes.append(f"Added tags: {', '.join(set(subscription.tags) - old_tags)}")
+                except ValueError as e:
+                    raise ValueError(str(e))
+
+            # Update status if specified
+            if args.set_status:
+                old_status = subscription.status
+                subscription.status = args.set_status
+                changes.append(f"Status: {old_status} → {args.set_status}")
+
+            # Update payment method if specified
+            if args.set_payment_method:
+                try:
+                    ValidationRegistry.validate_payment_method(args.set_payment_method)
+                    old_method = subscription.payment_method or "None"
+                    subscription.payment_method = args.set_payment_method
+                    changes.append(f"Payment Method: {old_method} → {args.set_payment_method}")
+                except ValueError as e:
+                    raise ValueError(str(e))
+
+            # Update tags if specified
+            if args.set_tags:
+                try:
+                    # Validate new tags
+                    for tag in args.set_tags:
+                        ValidationRegistry.validate_tag(tag)
+
+                    old_tags_str = ", ".join(subscription.tags) if subscription.tags else "None"
+                    new_tags_str = ", ".join(args.set_tags)
+
+                    # Replace all existing tags with new ones
+                    subscription.tags = args.set_tags
+                    changes.append(f"Tags: [{old_tags_str}] → [{new_tags_str}]")
                 except ValueError as e:
                     raise ValueError(str(e))
 
