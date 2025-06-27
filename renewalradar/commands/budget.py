@@ -93,7 +93,7 @@ class BudgetCommand(Command):
             print(f"Error: {e}")
 
     def view_budgets(self, db_manager, year=None, month=None, currency=None,
-                     detailed=False, using_default_year=True, using_default_month=True):
+                     detailed=False, using_default_year=True, using_default_month=True, show_rates=False):
         """
         View all budgets with usage statistics.
 
@@ -105,6 +105,7 @@ class BudgetCommand(Command):
             detailed: Show detailed subscription list
             using_default_year: Whether the year value is the default (current year)
             using_default_month: Whether the month value is the default (current month)
+            show_rates: Whether to display exchange rates
         """
         # Get the current date for reference
         current_date = datetime.datetime.now()
@@ -174,14 +175,41 @@ class BudgetCommand(Command):
             if is_current:
                 month_year = f"{Fore.CYAN}{month_year} (Current){Style.RESET_ALL}"
 
+            # Determine risk level based on percentage used
+            is_at_risk = percent_used > 90.0 and percent_used <= 100.0
+
+            # Format the Overspent status with appropriate risk labels
+            if is_overspent:
+                overspent_status = f"{Fore.RED}Yes [OVER]{Style.RESET_ALL}"
+            elif is_at_risk:
+                overspent_status = f"{Fore.YELLOW}No [RISK]{Style.RESET_ALL}"
+            else:
+                overspent_status = "No"
+
+            # Format percentage with color based on risk
+            if is_overspent:
+                percent_display = f"{Fore.RED}{percent_used:.1f}%{Style.RESET_ALL}"
+            elif is_at_risk:
+                percent_display = f"{Fore.YELLOW}{percent_used:.1f}%{Style.RESET_ALL}"
+            else:
+                percent_display = f"{percent_used:.1f}%"
+
+            # Format remaining amount
+            if is_overspent:
+                remaining_display = f"{Fore.RED}{remaining:.2f}{Style.RESET_ALL}"
+            elif is_at_risk:
+                remaining_display = f"{Fore.YELLOW}{remaining:.2f}{Style.RESET_ALL}"
+            else:
+                remaining_display = f"{remaining:.2f}"
+
             row = [
                 month_year,
                 budget_currency,
                 f"{budget_amount:.2f}",
                 f"{utilized:.2f}",
-                f"{Fore.RED}{remaining:.2f}{Style.RESET_ALL}" if is_overspent else f"{remaining:.2f}",
-                f"{Fore.RED}{percent_used:.1f}%{Style.RESET_ALL}" if is_overspent else f"{percent_used:.1f}%",
-                f"{Fore.RED}YES{Style.RESET_ALL}" if is_overspent else "NO",
+                remaining_display,
+                percent_display,
+                overspent_status,
                 costs.get(f"{budget_currency}_count", 0)  # Number of subscriptions
             ]
 
@@ -216,6 +244,44 @@ class BudgetCommand(Command):
         headers = ["Month", "Currency", "Budget", "Utilized", "Remaining", "% Used", "Overspent?",
                    "# Subscriptions"]
         print(tabulate(table_data, headers=headers, tablefmt="pretty"))
+
+        # Calculate totals in base currency (USD)
+        total_budget_usd = 0
+        total_utilized_usd = 0
+
+        # Calculate totals in base currency
+        for row in table_data:
+            currency = row[1]
+            budget = float(row[2])
+            utilized = float(row[3])
+
+            try:
+                # Convert amounts to USD
+                budget_usd = self._convert_currency(budget, currency, "USD")
+                utilized_usd = self._convert_currency(utilized, currency, "USD")
+
+                # Add to totals
+                total_budget_usd += budget_usd
+                total_utilized_usd += utilized_usd
+            except ValueError:
+                # Skip currencies that we don't have exchange rates for
+                print(f"Warning: Skipping {currency} - no exchange rate available for conversion to USD")
+
+        # Calculate remaining and percentage used
+        total_remaining_usd = total_budget_usd - total_utilized_usd
+        total_percent_used = (total_utilized_usd / total_budget_usd * 100) if total_budget_usd > 0 else 0
+
+        # Determine if overspent
+        is_overspent = total_remaining_usd < 0
+        overspent_text = "Yes [OVER]" if is_overspent else "No"
+
+        # Display total row
+        print("\nTOTAL (USD): " +
+              f"Budget = {total_budget_usd:.2f}, " +
+              f"Utilized = {total_utilized_usd:.2f}, " +
+              f"Remaining = {total_remaining_usd:.2f}, " +
+              f"% Used = {total_percent_used:.2f}%, " +
+              f"Overspent? = {overspent_text}")
 
         # Add a note about what's included in calculations
         print("\nNote:")
