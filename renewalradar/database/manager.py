@@ -22,6 +22,12 @@ class DatabaseManager:
         self.conn = None
         self.cursor = None
 
+    def get_connection(self):
+        if self.conn is None:
+            self.conn = sqlite3.connect(self.db_path)
+            self.conn.row_factory = sqlite3.Row  # Enable row access by column name
+        return self.conn
+
     def connect(self):
         """Connect to the SQLite database."""
         if self.conn is None:
@@ -309,3 +315,105 @@ class DatabaseManager:
                     payment_counts[method] = 1
 
         return payment_counts
+
+    def set_budget(self, year, month, currency, amount):
+        """Set a budget for a specific month, year, and currency."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Validate amount (must be positive)
+            if amount <= 0:
+                raise ValueError("Budget amount must be positive")
+
+            # Check if budget already exists
+            cursor.execute(
+                "SELECT id FROM budgets WHERE year = ? AND month = ? AND currency = ?",
+                (year, month, currency)
+            )
+            existing = cursor.fetchone()
+
+            if existing:
+                # Update existing budget
+                cursor.execute(
+                    """UPDATE budgets 
+                       SET amount = ?, updated_at = CURRENT_TIMESTAMP 
+                       WHERE year = ? AND month = ? AND currency = ?""",
+                    (amount, year, month, currency)
+                )
+                return False  # Not a new budget
+            else:
+                # Insert new budget
+                cursor.execute(
+                    """INSERT INTO budgets (year, month, currency, amount)
+                       VALUES (?, ?, ?, ?)""",
+                    (year, month, currency, amount)
+                )
+                return True  # New budget
+
+    def get_budgets(self, year=None, month=None, currency=None):
+        """Get all budgets, optionally filtered by year, month, or currency."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            query = "SELECT year, month, currency, amount FROM budgets"
+            params = []
+            conditions = []
+
+            if year is not None:
+                conditions.append("year = ?")
+                params.append(year)
+
+            if month is not None:
+                conditions.append("month = ?")
+                params.append(month)
+
+            if currency is not None:
+                conditions.append("currency = ?")
+                params.append(currency)
+
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+
+            query += " ORDER BY year DESC, month DESC, currency ASC"
+
+            cursor.execute(query, params)
+            return cursor.fetchall()
+
+    def get_subscription_costs_by_budget_period(self, year, month, currency=None):
+        """Get total subscription costs for a specific budget period."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Get all subscriptions with the specified currency (or all currencies if None)
+            query = """
+            SELECT id, name, cost, billing_cycle, currency
+            FROM subscriptions
+            WHERE currency = IFNULL(?, currency)
+            """
+
+            cursor.execute(query, (currency,))
+            subscriptions = cursor.fetchall()
+
+            # Calculate the monthly cost for each subscription based on billing cycle
+            costs_by_currency = {}
+            for sub in subscriptions:
+                _, _, cost, billing_cycle, sub_currency = sub
+
+                # Calculate monthly cost based on billing cycle
+                monthly_cost = 0
+                if billing_cycle.lower() == 'monthly':
+                    monthly_cost = cost
+                elif billing_cycle.lower() == 'quarterly':
+                    monthly_cost = cost / 3
+                elif billing_cycle.lower() == 'semi-annually':
+                    monthly_cost = cost / 6
+                elif billing_cycle.lower() == 'annually':
+                    monthly_cost = cost / 12
+                # Add more billing cycles as needed
+
+                # Add to the total for this currency
+                if sub_currency not in costs_by_currency:
+                    costs_by_currency[sub_currency] = 0
+                costs_by_currency[sub_currency] += monthly_cost
+
+            return costs_by_currency
