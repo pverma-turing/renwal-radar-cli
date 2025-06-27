@@ -241,8 +241,7 @@ class BudgetCommand(Command):
         print("=" * len(title))
 
         # Display the table
-        headers = ["Month", "Currency", "Budget", "Utilized", "Remaining", "% Used", "Overspent?",
-                   "# Subscriptions"]
+        headers = ["Month", "Currency", "Budget", "Utilized", "Remaining", "% Used", "Overspent?", "# Subscriptions"]
         print(tabulate(table_data, headers=headers, tablefmt="pretty"))
 
         # Calculate totals in base currency (USD)
@@ -288,11 +287,18 @@ class BudgetCommand(Command):
         print("- 'Utilized' includes all active (non-cancelled) subscriptions in the given month")
         print("- Calculations are based on subscription start and renewal dates")
         print("- All amounts are treated as monthly (no proration by billing cycle)")
+        print("- Totals are converted to USD using fixed exchange rates")
+
+        # Add note about risk levels and color coding
+        print("- Risk level indicators:")
+        print(f"  • {Fore.RED}[OVER]{Style.RESET_ALL}: Budget exceeded (> 100% used)")
+        print(f"  • {Fore.YELLOW}[RISK]{Style.RESET_ALL}: High-risk budget (> 90% but ≤ 100% used)")
+        print(f"  • No label: Budget within safe range (≤ 90% used)")
 
         # Add note about current month highlighting
         if using_default_month and using_default_year:
             print(f"- Current month is highlighted: {calendar.month_name[current_month]} {current_year}")
-        elif any("Current" in row[0] for row in table_data):
+        elif any("Current" in str(row[0]) for row in table_data):
             print(f"- Current month is highlighted: {calendar.month_name[current_month]} {current_year}")
 
         # Mention filter usage
@@ -350,11 +356,26 @@ class BudgetCommand(Command):
                 remaining = budget_amount - utilized
                 is_overspent = remaining < 0
 
-                # Show overspent status with coloring
+                # Calculate percentage used
+                percent_used = (utilized / budget_amount) * 100 if budget_amount > 0 else 0
+
+                # Determine risk level
+                is_overspent = remaining < 0
+                is_at_risk = percent_used > 90.0 and percent_used <= 100.0
+
+                # Show status with appropriate coloring and labels
                 if is_overspent:
-                    print(f"  Remaining: {Fore.RED}{remaining:.2f} (OVERSPENT){Style.RESET_ALL}")
+                    status_text = f"{Fore.RED}OVER BUDGET (-{abs(remaining):.2f}){Style.RESET_ALL}"
+                    print(f"  Remaining: {Fore.RED}{remaining:.2f}{Style.RESET_ALL}")
+                    print(f"  Status: {status_text} - {Fore.RED}{percent_used:.1f}%{Style.RESET_ALL} used")
+                elif is_at_risk:
+                    status_text = f"{Fore.YELLOW}AT RISK (only {remaining:.2f} remaining){Style.RESET_ALL}"
+                    print(f"  Remaining: {Fore.YELLOW}{remaining:.2f}{Style.RESET_ALL}")
+                    print(f"  Status: {status_text} - {Fore.YELLOW}{percent_used:.1f}%{Style.RESET_ALL} used")
                 else:
+                    status_text = f"OK ({remaining:.2f} remaining)"
                     print(f"  Remaining: {remaining:.2f}")
+                    print(f"  Status: {status_text} - {percent_used:.1f}% used")
 
                 # Show subscription details
                 print("\n  Subscriptions:")
