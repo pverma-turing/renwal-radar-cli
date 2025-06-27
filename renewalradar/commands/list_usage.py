@@ -2,6 +2,7 @@ from renewalradar.commands.base import Command
 from renewalradar.database.manager import DatabaseManager
 from renewalradar.models.subscription import Subscription
 from renewalradar.registry import register_command
+from renewalradar.utils.validators import ValidationRegistry
 
 
 @register_command
@@ -53,6 +54,12 @@ class ListUsageCommand(Command):
             help="Filter by specific payment method(s). Can be used multiple times."
         )
 
+        parser.add_argument(
+            "--unused-tags",
+            action="store_true",
+            help="List tags from the global registry that are not currently in use"
+        )
+
         parser.set_defaults(func=self.execute)
         return parser
 
@@ -84,6 +91,13 @@ class ListUsageCommand(Command):
             # Show tag usage if requested
             if args.list_tags:
                 self._list_tag_usage(filters)
+
+            # Show unused tags if requested
+            if args.unused_tags:
+                # Add a blank line if both tags and unused tags are listed for better readability
+                if args.list_tags:
+                    print()
+                self._list_unused_tags(filters)
 
             # Show payment method usage if requested
             if args.list_payment_methods:
@@ -139,6 +153,26 @@ class ListUsageCommand(Command):
         # Print sorted by count (descending)
         for method, count in sorted(method_counts.items(), key=lambda x: (-x[1], x[0])):
             print(f"{method:<{max_length}} – {count}")
+
+    def _list_unused_tags(self, filters):
+        """List tags from the global registry that are not currently in use."""
+        # Get all valid tags from the registry
+        valid_tags = set(ValidationRegistry.VALID_TAGS)
+
+        # Get tags that are currently in use based on filters
+        used_tags = set(self.db_manager.get_tag_usage(filters).keys())
+
+        # Find tags that are in the registry but not in use
+        unused_tags = valid_tags - used_tags
+
+        # Display results
+        print("Unused Tags:")
+        if unused_tags:
+            # Sort alphabetically for consistent output
+            for tag in sorted(unused_tags):
+                print(f"- {tag}")
+        else:
+            print("All tags are currently in use.")
 
     def _display_filter_info(self, args, filters):
         """Display information about active filters."""
