@@ -1,3 +1,5 @@
+import json
+
 from renewalradar.commands.base import Command
 from renewalradar.database.manager import DatabaseManager
 from renewalradar.models.subscription import Subscription
@@ -60,6 +62,12 @@ class ListUsageCommand(Command):
             help="List tags from the global registry that are not currently in use"
         )
 
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Output results in JSON format for machine readability"
+        )
+
         parser.set_defaults(func=self.execute)
         return parser
 
@@ -87,6 +95,11 @@ class ListUsageCommand(Command):
 
             if args.currency:
                 filters["currency"] = args.currency
+
+            # If JSON output is requested, build a data structure and return as JSON
+            if args.json:
+                self._output_json(args, filters)
+                return 0
 
             # Show tag usage if requested
             if args.list_tags:
@@ -117,6 +130,36 @@ class ListUsageCommand(Command):
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
             return 1
+
+    def _output_json(self, args, filters):
+        """Output usage data in JSON format."""
+        # Initialize the JSON data structure
+        json_data = {}
+        db_manager = DatabaseManager()
+        # Include tags if requested
+        if args.list_tags:
+            tag_counts = db_manager.get_tag_usage(filters)
+            json_data["tags"] = tag_counts
+
+        # Include unused tags if requested
+        if args.unused_tags:
+            # Get all valid tags from the registry
+            valid_tags = set(ValidationRegistry.VALID_TAGS)
+
+            # Get tags that are currently in use based on filters
+            used_tags = set(db_manager.get_tag_usage(filters).keys())
+
+            # Find tags that are in the registry but not in use
+            unused_tags = sorted(list(valid_tags - used_tags))
+            json_data["unused_tags"] = unused_tags
+
+        # Include payment methods if requested
+        if args.list_payment_methods:
+            method_counts = db_manager.get_payment_method_usage(filters)
+            json_data["payment_methods"] = method_counts
+
+        # Output the JSON data
+        print(json.dumps(json_data, indent=2))
 
     def _list_tag_usage(self, filters):
         """List all distinct tags in use with usage count."""
@@ -158,9 +201,9 @@ class ListUsageCommand(Command):
         """List tags from the global registry that are not currently in use."""
         # Get all valid tags from the registry
         valid_tags = set(ValidationRegistry.VALID_TAGS)
-
+        db_manager = DatabaseManager()
         # Get tags that are currently in use based on filters
-        used_tags = set(self.db_manager.get_tag_usage(filters).keys())
+        used_tags = set(db_manager.get_tag_usage(filters).keys())
 
         # Find tags that are in the registry but not in use
         unused_tags = valid_tags - used_tags

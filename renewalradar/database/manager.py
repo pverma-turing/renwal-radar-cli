@@ -131,7 +131,7 @@ class DatabaseManager:
             sub_dict = {key: row[key] for key in row.keys()}
             subscriptions.append(Subscription.from_dict(sub_dict))
 
-        conn.close()
+        # conn.close()
         return subscriptions
 
     def get_distinct_values(self, column):
