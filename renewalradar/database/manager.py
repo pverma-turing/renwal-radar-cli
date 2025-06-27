@@ -380,40 +380,118 @@ class DatabaseManager:
             return cursor.fetchall()
 
     def get_subscription_costs_by_budget_period(self, year, month, currency=None):
-        """Get total subscription costs for a specific budget period."""
+        """
+        Get total subscription costs for a specific budget period.
+
+        Calculates the sum of subscription costs that are active in the given month/year,
+        excluding cancelled subscriptions and considering renewal/start dates.
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
-            # Get all subscriptions with the specified currency (or all currencies if None)
-            query = """
-            SELECT id, name, cost, billing_cycle, currency
-            FROM subscriptions
-            WHERE currency = IFNULL(?, currency)
-            """
+            # Create date range for the given month
+            import calendar
+            import datetime
 
-            cursor.execute(query, (currency,))
+            # Get the first and last day of the month
+            first_day = datetime.date(year, month, 1)
+            last_day = datetime.date(year, month, calendar.monthrange(year, month)[1])
+
+            # Format dates for SQLite (YYYY-MM-DD)
+            first_day_str = first_day.strftime('%Y-%m-%d')
+            last_day_str = last_day.strftime('%Y-%m-%d')
+
+            # Get all active subscriptions (non-cancelled) that are active in the given month
+            query = """
+                       SELECT 
+                           s.currency, 
+                           s.cost,
+                           s.name,
+                           s.start_date,
+                           s.renewal_date,
+                           s.billing_cycle
+                       FROM 
+                           subscriptions s
+                       WHERE 
+                           s.currency = IFNULL(?, s.currency)
+                           AND (s.status IS NULL OR s.status != 'cancelled')
+                           AND (
+                               /* Case 1: Subscription starts before or during this month */
+                               (s.start_date IS NULL OR s.start_date <= ?)
+                               AND
+                               /* Case 2: Either has no renewal date, or renews after or during this month */
+                               (
+                                   s.renewal_date IS NULL 
+                                   OR 
+                                   (
+                                       /* Subscription that renews during this month is active */
+                                       (s.renewal_date >= ? AND s.renewal_date <= ?)
+                                       OR
+                                       /* Subscription that renewed before this month but has next renewal after month */
+                                       (
+                                           s.start_date <= ? 
+                                           AND 
+                                           (
+                                               /* Handle different billing cycles to calculate next renewal */
+                                               (s.billing_cycle = 'monthly' AND DATE(s.renewal_date, '+1 month') >= ?)
+                                               OR (s.billing_cycle = 'quarterly' AND DATE(s.renewal_date, '+3 month') >= ?)
+                                               OR (s.billing_cycle = 'annually' AND DATE(s.renewal_date, '+12 month') >= ?)
+                                               OR (s.billing_cycle = 'semi-annually' AND DATE(s.renewal_date, '+6 month') >= ?)
+                                               OR (s.billing_cycle IS NULL)
+                                           )
+                                       )
+                                   )
+                               )
+                           )
+                       """
+
+            # Execute with all the date parameters for different billing cycle checks
+            params = (
+                currency,
+                last_day_str,  # For start_date check
+                first_day_str, last_day_str,  # For renewal during month
+                last_day_str,  # For start before month end
+                first_day_str,  # Monthly
+                first_day_str,  # Quarterly
+                first_day_str,  # Annually
+                first_day_str  # Semi-annually
+            )
+            cursor.execute(query, params)
             subscriptions = cursor.fetchall()
 
-            # Calculate the monthly cost for each subscription based on billing cycle
+            # Calculate monthly costs per currency
             costs_by_currency = {}
-            for sub in subscriptions:
-                _, _, cost, billing_cycle, sub_currency = sub
+            counts_by_currency = {}
 
-                # Calculate monthly cost based on billing cycle
-                monthly_cost = 0
-                if billing_cycle.lower() == 'monthly':
-                    monthly_cost = cost
-                elif billing_cycle.lower() == 'quarterly':
-                    monthly_cost = cost / 3
-                elif billing_cycle.lower() == 'semi-annually':
-                    monthly_cost = cost / 6
-                elif billing_cycle.lower() == 'annually':
-                    monthly_cost = cost / 12
-                # Add more billing cycles as needed
+            # Debug information
+            subscription_details = {}
+
+            for sub in subscriptions:
+                # Parse all the fields we're returning
+                sub_currency = sub[0]
+                cost = sub[1]
+                name = sub[2] if len(sub) > 2 else "Unknown"
+
+                # For now, we assume monthly billing as requested
+                # No prorating based on billing cycle yet
+                monthly_cost = cost
 
                 # Add to the total for this currency
                 if sub_currency not in costs_by_currency:
                     costs_by_currency[sub_currency] = 0
+                    counts_by_currency[sub_currency] = 0
+                    subscription_details[sub_currency] = []
+
                 costs_by_currency[sub_currency] += monthly_cost
+                counts_by_currency[sub_currency] += 1
+
+                # Keep track of which subscriptions are included for debugging
+                if len(sub) > 2:  # If we have the name
+                    subscription_details[sub_currency].append(name)
+
+            # Add the counts and details to the result dictionary
+            for currency, count in counts_by_currency.items():
+                costs_by_currency[f"{currency}_count"] = count
+                costs_by_currency[f"{currency}_details"] = subscription_details.get(currency, [])
 
             return costs_by_currency

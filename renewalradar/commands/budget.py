@@ -22,6 +22,7 @@ class BudgetCommand(Command):
         parser.add_argument("--currency", type=str, help="Currency code (e.g., USD)")
         parser.add_argument("--year", type=int, help="Year for the budget (defaults to current year)")
         parser.add_argument("--month", type=int, help="Month for the budget (1-12, defaults to current month)")
+        parser.add_argument("--detailed", action="store_true", help="Show detailed subscription list in budget view")
 
         return parser
 
@@ -46,9 +47,9 @@ class BudgetCommand(Command):
         month = args.month if args.month else current_date.month
 
         if args.set:
-            self.set_budget(db_manager, year, month, args.currency, args.set)
+           self.set_budget(db_manager, year, month, args.currency, args.set)
         elif args.view:
-            self.view_budgets(db_manager, year, month, args.currency)
+           self.view_budgets(db_manager, year, month, args.currency, args.detailed)
 
     def set_budget(self, db_manager, year, month, currency, amount):
         """Set a budget for a specific month, year, and currency."""
@@ -63,7 +64,7 @@ class BudgetCommand(Command):
         except ValueError as e:
             print(f"Error: {e}")
 
-    def view_budgets(self, db_manager, year=None, month=None, currency=None):
+    def view_budgets(self, db_manager, year=None, month=None, currency=None, detailed=False):
         """View all budgets with usage statistics."""
         budgets = db_manager.get_budgets(year, month, currency)
 
@@ -72,6 +73,9 @@ class BudgetCommand(Command):
             return
 
         table_data = []
+        current_date = datetime.datetime.now()
+        current_month = current_date.month
+        current_year = current_date.year
 
         for budget in budgets:
             budget_year, budget_month, budget_currency, budget_amount = budget
@@ -90,21 +94,70 @@ class BudgetCommand(Command):
 
             # Format for display
             month_name = calendar.month_name[budget_month]
+
+            # Determine if this is the current month
+            is_current = (budget_month == current_month and budget_year == current_year)
             is_overspent = remaining < 0
 
             # Create row with color formatting
+            # Highlight current month with a different color
+            month_year = f"{month_name} {budget_year}"
+            if is_current:
+                month_year = f"{Fore.CYAN}{month_year} (Current){Style.RESET_ALL}"
+
             row = [
-                f"{month_name} {budget_year}",
+                month_year,
                 budget_currency,
                 f"{budget_amount:.2f}",
                 f"{utilized:.2f}",
                 f"{Fore.RED}{remaining:.2f}{Style.RESET_ALL}" if is_overspent else f"{remaining:.2f}",
                 f"{Fore.RED}{percent_used:.1f}%{Style.RESET_ALL}" if is_overspent else f"{percent_used:.1f}%",
-                f"{Fore.RED}YES{Style.RESET_ALL}" if is_overspent else "NO"
+                f"{Fore.RED}YES{Style.RESET_ALL}" if is_overspent else "NO",
+                costs.get(f"{budget_currency}_count", 0)  # Number of subscriptions
             ]
 
             table_data.append(row)
 
+            # Sort table - current month first, then by date (most recent first)
+        table_data.sort(key=lambda x: (0 if "Current" in x[0] else 1, x[0]), reverse=True)
+
         # Display the table
-        headers = ["Month", "Currency", "Budget", "Utilized", "Remaining", "% Used", "Overspent?"]
+        headers = ["Month", "Currency", "Budget", "Utilized", "Remaining", "% Used", "Overspent?", "# Subscriptions"]
         print(tabulate(table_data, headers=headers, tablefmt="pretty"))
+
+        # Add a note about what's included in calculations
+        print("\nNote:")
+        print("- 'Utilized' includes all active (non-cancelled) subscriptions in the given month")
+        print("- Calculations are based on subscription start and renewal dates")
+        print("- All amounts are treated as monthly (no proration by billing cycle)")
+        if not year and not month:
+            print(f"- Current month is highlighted: {calendar.month_name[current_month]} {current_year}")
+
+        # Show detailed subscription lists if requested
+        if detailed:
+            print("\nSubscriptions included in budget calculations:")
+            print("=============================================")
+            for budget in budgets:
+                budget_year, budget_month, budget_currency, budget_amount = budget
+                month_name = calendar.month_name[budget_month]
+
+                # Get subscription costs and details for this budget period
+                costs = db_manager.get_subscription_costs_by_budget_period(
+                    budget_year, budget_month, budget_currency
+                )
+
+                # Get subscription details
+                subscription_names = costs.get(f"{budget_currency}_details", [])
+                count = costs.get(f"{budget_currency}_count", 0)
+                utilized = costs.get(budget_currency, 0)
+
+                print(
+                    f"\n{month_name} {budget_year} - {budget_currency} ({count} subscriptions, total: {utilized:.2f}):")
+
+                if subscription_names:
+                    for i, name in enumerate(subscription_names, 1):
+                        print(f"  {i}. {name}")
+                else:
+                    print("  No subscriptions found for this period.")
+
+                print("-" * 50)
