@@ -39,6 +39,10 @@ class BudgetCommand(Command):
         parser.add_argument("--base-currency", type=str, help="Base currency for totals (defaults to USD)")
         parser.add_argument("--set-rate", action="append",
                             help="Temporarily override an exchange rate (format: CURRENCY=RATE). Can be used multiple times.")
+        parser.add_argument("--tag", type=str,
+                            help="Filter utilized amounts to include only subscriptions with this tag")
+        parser.add_argument("--payment-method", type=str,
+                            help="Filter utilized amounts to include only subscriptions with this payment method")
 
         return parser
 
@@ -152,7 +156,9 @@ class BudgetCommand(Command):
                 using_default_month=using_default_month,
                 show_rates=args.show_rates,
                 base_currency=args.base_currency,
-                rate_overrides=args.rate_overrides
+                rate_overrides=args.rate_overrides,
+                tag=args.tag,
+                payment_method=args.payment_method
             )
 
     def set_budget(self, db_manager, year, month, currency, amount):
@@ -170,7 +176,8 @@ class BudgetCommand(Command):
 
     def view_budgets(self, db_manager, year=None, month=None, currency=None,
                      detailed=False, using_default_year=True, using_default_month=True,
-                     show_rates=False, base_currency=None, rate_overrides=None):
+                     show_rates=False, base_currency=None, rate_overrides=None,
+                     tag=None, payment_method=None):
         """
         View all budgets with usage statistics.
 
@@ -185,6 +192,8 @@ class BudgetCommand(Command):
             show_rates: Whether to display exchange rates
             base_currency: Base currency for totals (defaults to USD)
             rate_overrides: Dictionary of currency -> rate overrides
+            tag: Filter utilized amounts to subscriptions with this tag
+            payment_method: Filter utilized amounts to subscriptions with this payment method
         """
         # Set default base currency if not provided
         if base_currency is None:
@@ -205,7 +214,7 @@ class BudgetCommand(Command):
         current_month = current_date.month
         current_year = current_date.year
 
-        # Build a description of the filters being used
+        # Build descriptions of the date/currency filters being used
         filter_descriptions = []
         if year is not None:
             filter_descriptions.append(f"year={year}")
@@ -215,6 +224,13 @@ class BudgetCommand(Command):
             filter_descriptions.append(f"currency={currency}")
 
         filter_text = f" with filters: {', '.join(filter_descriptions)}" if filter_descriptions else ""
+
+        # Track utilization filters separately - these only apply to the utilization calculation
+        utilization_filters = []
+        if tag is not None:
+            utilization_filters.append(f"tag={tag}")
+        if payment_method is not None:
+            utilization_filters.append(f"payment_method={payment_method}")
 
         # Get budgets with the specified filters
         budgets = db_manager.get_budgets(year, month, currency)
@@ -245,11 +261,15 @@ class BudgetCommand(Command):
 
             # Get subscription costs for this budget period
             costs = db_manager.get_subscription_costs_by_budget_period(
-                budget_year, budget_month, budget_currency
+                budget_year, budget_month, budget_currency,
+                tag=tag, payment_method=payment_method
             )
 
             # Get utilized amount (or 0 if no subscriptions in this currency)
             utilized = costs.get(budget_currency, 0)
+
+            # Get subscription count for this currency
+            subscription_count = costs.get(f"{budget_currency}_count", 0)
 
             # Calculate remaining budget and percentage used
             remaining = budget_amount - utilized
@@ -332,6 +352,11 @@ class BudgetCommand(Command):
         # Show title with filter information
         print(f"\n{title}")
         print("=" * len(title))
+
+        # Show utilization filters if any are active
+        if utilization_filters:
+            filter_line = "Utilization filtered by: " + ", ".join(utilization_filters)
+            print(f"\n{filter_line}")
 
         # Display exchange rates if requested
         if show_rates:
@@ -431,9 +456,18 @@ class BudgetCommand(Command):
 
         # Add a note about what's included in calculations
         print("\nNote:")
-        print("- 'Utilized' includes all active (non-cancelled) subscriptions in the given month")
+
+        # Explain what's included in 'Utilized' based on filters
+        if utilization_filters:
+            util_filter_text = " and ".join(utilization_filters)
+            print(f"- 'Utilized' includes only active subscriptions matching filter: {util_filter_text}")
+        else:
+            print("- 'Utilized' includes all active (non-cancelled) subscriptions in the given month")
+
         print("- Calculations are based on subscription start and renewal dates")
         print("- All amounts are treated as monthly (no proration by billing cycle)")
+        if utilization_filters:
+            print("- Budget limits remain the same regardless of utilization filters")
 
         # Add information about exchange rates
         override_note = ""

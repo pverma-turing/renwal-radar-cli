@@ -379,12 +379,19 @@ class DatabaseManager:
             cursor.execute(query, params)
             return cursor.fetchall()
 
-    def get_subscription_costs_by_budget_period(self, year, month, currency=None):
+    def get_subscription_costs_by_budget_period(self, year, month, currency=None, tag=None, payment_method=None):
         """
         Get total subscription costs for a specific budget period.
 
         Calculates the sum of subscription costs that are active in the given month/year,
         excluding cancelled subscriptions and considering renewal/start dates.
+
+        Args:
+            year: Year for the budget period
+            month: Month for the budget period (1-12)
+            currency: Currency code to filter by (or None for all currencies)
+            tag: Filter by subscription tag
+            payment_method: Filter by payment method
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -401,15 +408,10 @@ class DatabaseManager:
             first_day_str = first_day.strftime('%Y-%m-%d')
             last_day_str = last_day.strftime('%Y-%m-%d')
 
-            # Get all active subscriptions (non-cancelled) that are active in the given month
+            # Build the query to find active subscriptions in the month
             query = """
                        SELECT 
-                           s.currency, 
-                           s.cost,
-                           s.name,
-                           s.start_date,
-                           s.renewal_date,
-                           s.billing_cycle
+                           s.currency, s.cost, s.name
                        FROM 
                            subscriptions s
                        WHERE 
@@ -445,8 +447,16 @@ class DatabaseManager:
                            )
                        """
 
-            # Execute with all the date parameters for different billing cycle checks
-            params = (
+            # Add tag filter if provided
+            if tag is not None:
+                query += " AND s.tags LIKE ? "
+
+            # Add payment method filter if provided
+            if payment_method is not None:
+                query += " AND s.payment_method = ? "
+
+            # Build the parameters list
+            params = [
                 currency,
                 last_day_str,  # For start_date check
                 first_day_str, last_day_str,  # For renewal during month
@@ -455,8 +465,18 @@ class DatabaseManager:
                 first_day_str,  # Quarterly
                 first_day_str,  # Annually
                 first_day_str  # Semi-annually
-            )
-            cursor.execute(query, params)
+            ]
+
+            # Add tag parameter if provided
+            if tag is not None:
+                params.append(f"%{tag}%")  # Using LIKE for partial tag matching
+
+            # Add payment method parameter if provided
+            if payment_method is not None:
+                params.append(payment_method)
+
+
+            cursor.execute(query, tuple(params))
             subscriptions = cursor.fetchall()
 
             # Calculate monthly costs per currency
