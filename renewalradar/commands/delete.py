@@ -71,6 +71,26 @@ class DeleteCommand(Command):
         # Filter subscriptions with case-insensitive matching
         return [sub for sub in all_subscriptions if sub['name'].lower() == name.lower()]
 
+    def _get_child_subscriptions(self, db_manager: DatabaseManager, parent_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all child subscriptions that have the given parent_name.
+
+        Args:
+            db_manager: Database manager instance
+            parent_name: Name of the parent subscription
+
+        Returns:
+            List of child subscription dictionaries
+        """
+        # Get all subscriptions
+        all_subscriptions = db_manager.get_subscriptions()
+
+        # Filter subscriptions that have the given parent_name
+        return [
+            sub for sub in all_subscriptions
+            if 'parent_subscription_id' in sub and sub['parent_subscription_id'] == parent_id
+        ]
+
     def _check_budget_contribution(self, subscription: Dict[str, Any]) -> bool:
         """
         Check if the subscription contributes to current or recent month's budget.
@@ -185,6 +205,15 @@ class DeleteCommand(Command):
 
         # Store subscription details
         subscription = subscriptions[0]
+
+        # Check for child subscriptions linked to this parent, regardless of flags
+        child_subscriptions = self._get_child_subscriptions(db_manager, subscription['id'])
+        if child_subscriptions:
+            child_names = [child['name'] for child in child_subscriptions]
+            child_list = "\n- " + "\n- ".join(child_names)
+            print(
+                f"```\nCannot delete '{subscription['name']}' because it has linked child subscriptions:{child_list}\nPlease delete or reassign these child subscriptions first.\n```")
+            return 1
 
         # Handle dry run mode
         if args.dry_run:
