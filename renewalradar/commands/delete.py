@@ -53,6 +53,24 @@ class DeleteCommand(Command):
             help="Confirm deletion of the subscription",
         )
 
+    def _get_subscription_by_name_case_insensitive(self, db_manager: DatabaseManager, name: str) -> List[
+        Dict[str, Any]]:
+        """
+        Get subscriptions with case-insensitive name matching.
+
+        Args:
+            db_manager: Database manager instance
+            name: Name to search for (case-insensitive)
+
+        Returns:
+            List of matching subscription dictionaries
+        """
+        # Get all subscriptions
+        all_subscriptions = db_manager.get_subscriptions()
+
+        # Filter subscriptions with case-insensitive matching
+        return [sub for sub in all_subscriptions if sub['name'].lower() == name.lower()]
+
     def _check_budget_contribution(self, subscription: Dict[str, Any]) -> bool:
         """
         Check if the subscription contributes to current or recent month's budget.
@@ -136,11 +154,17 @@ class DeleteCommand(Command):
             print(f"```\nCannot use --dry-run and --force together.\n```")
             return 1
 
-        # Get subscription by name or ID
+        # Get subscription by name (case-insensitive) or ID
         if args.name is not None:
-            subscriptions = db_manager.get_subscriptions(name=args.name)
+            subscriptions = self._get_subscription_by_name_case_insensitive(db_manager, args.name)
             identifier = args.name
             id_type = "name"
+
+            # Check for multiple matches with the same case-insensitive name
+            if len(subscriptions) > 1:
+                print(
+                    f"```\nMultiple subscriptions found with name '{args.name}' (case-insensitive).\nUse --id to delete the exact subscription.\n```")
+                return 1
         else:  # args.id is not None
             subscriptions = db_manager.get_subscriptions(subscription_id=args.id)
             identifier = args.id
@@ -172,10 +196,9 @@ class DeleteCommand(Command):
 
         # Delete the subscription
         try:
-            if args.name is not None:
-                success = db_manager.delete_subscription_by_name(args.name)
-            else:  # args.id is not None
-                success = db_manager.delete_subscription_by_id(args.id)
+            # Use ID for deletion to ensure we delete the exact subscription
+            # (since we already have the subscription object, we can get its ID)
+            success = db_manager.delete_subscription_by_id(subscription['id'])
 
             if success:
                 # For force mode, just show a simple message
