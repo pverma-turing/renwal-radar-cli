@@ -165,15 +165,23 @@ class DeleteCommand(Command):
                 print(
                     f"```\nMultiple subscriptions found with name '{args.name}' (case-insensitive).\nUse --id to delete the exact subscription.\n```")
                 return 1
+
+            # Improved error message when no subscription is found by name
+            if not subscriptions:
+                print(
+                    f"```\nNo subscription found with name '{args.name}'.\nTip: Use the 'view' command to list all subscriptions.\n```")
+                return 1
+
         else:  # args.id is not None
             subscriptions = db_manager.get_subscriptions(subscription_id=args.id)
             identifier = args.id
             id_type = "ID"
 
-        # Check if subscription exists
-        if not subscriptions:
-            print(f"```\nNo subscription found with {id_type}: {identifier}\n```")
-            return 1
+            # Improved error message when no subscription is found by ID
+            if not subscriptions:
+                print(
+                    f"```\nNo subscription found with ID {args.id}.\nTip: Use the 'view' command to list all subscriptions with their IDs.\n```")
+                return 1
 
         # Store subscription details
         subscription = subscriptions[0]
