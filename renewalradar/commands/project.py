@@ -28,6 +28,16 @@ class ProjectCommand(Command):
             default=3,
             help="Number of months to project renewals for (default: 3)"
         )
+        parser.add_argument(
+            "--tag",
+            type=str,
+            help="Filter projections by specified tag"
+        )
+        parser.add_argument(
+            "--payment-method",
+            type=str,
+            help="Filter projections by payment method"
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Handle the project command."""
@@ -42,14 +52,30 @@ class ProjectCommand(Command):
         # Calculate the end date for projections
         end_date = today + datetime.timedelta(days=args.months * 30)  # Approximation
 
-        # Get all active or trial subscriptions
+        # Get all active or trial subscriptions with specified filters
         db_manager = DatabaseManager()
-        subscriptions = db_manager.get_filtered_subscriptions(
-            filters={'status': ["active", "trial"]}  # Assuming these are the status values used
-        )
+
+        # Prepare filters
+        filters = {
+            "status": ["active", "trial"]  # Always filter for active or trial subscriptions
+        }
+
+        # Add tag filter if provided
+        if args.tag:
+            filters["tag"] = args.tag
+
+        # Add payment method filter if provided
+        if args.payment_method:
+            filters["payment_method"] = args.payment_method
+
+        # Get filtered subscriptions
+        subscriptions = db_manager.get_filtered_subscriptions(filters=filters)
+
+        # Show filter info for user awareness
+        self._print_filter_info(args)
 
         if not subscriptions:
-            print("No active or trial subscriptions found.")
+            print("No subscriptions found matching the specified criteria.")
             return
 
         # Project renewals for each subscription
@@ -57,6 +83,19 @@ class ProjectCommand(Command):
 
         # Display the projection in a table format
         self._display_projection(projection, today, end_date)
+
+    def _print_filter_info(self, args: argparse.Namespace) -> None:
+        """Print information about active filters."""
+        filters_applied = []
+
+        if args.tag:
+            filters_applied.append(f"tag: '{args.tag}'")
+
+        if args.payment_method:
+            filters_applied.append(f"payment method: '{args.payment_method}'")
+
+        if filters_applied:
+            print(f"Applying filters: {', '.join(filters_applied)}")
 
     def _project_renewals(
             self,
