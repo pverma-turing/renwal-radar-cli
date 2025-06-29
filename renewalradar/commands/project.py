@@ -11,6 +11,7 @@ from renewalradar.database.manager import DatabaseManager
 from renewalradar.models.subscription import Subscription
 from renewalradar.registry import register_command
 from renewalradar.utils import date_utils
+from renewalradar.utils.date_utils import parse_date
 
 # Exchange rates dictionary (fixed rates for conversion)
 # All rates are relative to USD (USD = 1.0)
@@ -241,6 +242,100 @@ class ProjectCommand(Command):
         # Calculate monthly cost and round to 2 decimal places
         return round(cost / months, 2)
 
+    def _get_trial_end_date(self, subscription: Subscription) -> datetime.date:
+        """
+        Calculate when a trial subscription will end and convert to paid.
+        Trial period is assumed to be one billing cycle starting from start_date.
+        """
+        if not hasattr(subscription, 'start_date') or not hasattr(subscription, 'billing_cycle'):
+            # If missing required attributes, use renewal date as fallback
+            return parse_date(subscription.renewal_date)
+
+        # Get the trial start date
+        start_date = parse_date(subscription.start_date)
+
+        # Calculate trial end date based on billing cycle
+        billing_cycle = subscription.billing_cycle.lower()
+
+        if billing_cycle == 'monthly':
+            # Add 1 month to start date
+            month = start_date.month + 1
+            year = start_date.year
+
+            if month > 12:
+                month = 1
+                year += 1
+
+            # Adjust for month length differences
+            max_day = calendar.monthrange(year, month)[1]
+            day = min(start_date.day, max_day)
+
+            return datetime.date(year, month, day)
+
+        elif billing_cycle == 'yearly' or billing_cycle == 'annual':
+            # Add 1 year to start date
+            try:
+                return datetime.date(
+                    start_date.year + 1,
+                    start_date.month,
+                    start_date.day
+                )
+            except ValueError:  # Handle February 29th in leap years
+                return datetime.date(
+                    start_date.year + 1,
+                    start_date.month,
+                    28  # Default to Feb 28th
+                )
+
+        elif billing_cycle == 'weekly':
+            # Add 7 days to start date
+            return start_date + datetime.timedelta(days=7)
+
+        elif billing_cycle == 'quarterly':
+            # Add 3 months to start date
+            month = start_date.month + 3
+            year = start_date.year
+
+            if month > 12:
+                month = month - 12
+                year += 1
+
+            # Adjust for month length differences
+            max_day = calendar.monthrange(year, month)[1]
+            day = min(start_date.day, max_day)
+
+            return datetime.date(year, month, day)
+
+        elif billing_cycle == 'biannual' or billing_cycle == 'semi-annual':
+            # Add 6 months to start date
+            month = start_date.month + 6
+            year = start_date.year
+
+            if month > 12:
+                month = month - 12
+                year += 1
+
+            # Adjust for month length differences
+            max_day = calendar.monthrange(year, month)[1]
+            day = min(start_date.day, max_day)
+
+            return datetime.date(year, month, day)
+
+        else:
+            # Default to monthly for unknown billing cycles
+            print(f"Warning: Unknown billing cycle '{billing_cycle}'. Assuming monthly trial.")
+            month = start_date.month + 1
+            year = start_date.year
+
+            if month > 12:
+                month = 1
+                year += 1
+
+            max_day = calendar.monthrange(year, month)[1]
+            day = min(start_date.day, max_day)
+
+            return datetime.date(year, month, day)
+
     def _project_renewals(
             self,
             subscriptions: List[Subscription],
@@ -264,23 +359,38 @@ class ProjectCommand(Command):
             if hasattr(subscription, 'status') and subscription.status == 'canceled':
                 continue
 
-            # Start with the current renewal date
-            renewal_date = datetime.datetime.strptime(subscription.renewal_date, '%Y-%m-%d').date()
-
             # Get the subscription cost
             cost = float(subscription.cost)
 
-            # For trial subscriptions, calculate when they'll convert to paid
+            # Check if this is a trial subscription
+            is_trial = False
             if hasattr(subscription, 'status') and subscription.status == 'trial':
-                # Use the renewal date as the conversion date for trials
-                pass  # The default logic works for trials too
+                is_trial = True
+                # Calculate when the trial ends
+                trial_end_date = self._get_trial_end_date(subscription)
+
+            # Set the initial renewal date
+            if is_trial:
+                # For trial subscriptions, first renewal is when trial ends
+                renewal_date = trial_end_date
+            else:
+                # For active subscriptions, use the current renewal date
+                renewal_date = subscription.renewal_date
 
             if normalize:
                 # Normalize the cost to a monthly amount
                 monthly_cost = self._normalize_cost(cost, subscription.billing_cycle)
 
-                # Calculate months to include in the projection
-                current_date = max(start_date, renewal_date)
+                # For normalized projections, we need to handle the trial period differently
+                if is_trial:
+                    # Calculate the first month after trial ends
+                    first_paid_month = max(start_date, trial_end_date)
+
+                    # Only include months after trial ends
+                    current_date = first_paid_month
+                else:
+                    # For non-trial subscriptions, start from the projection start date
+                    current_date = max(start_date, renewal_date)
 
                 # Add normalized cost for each month in the projection period
                 while current_date <= end_date:
@@ -309,7 +419,12 @@ class ProjectCommand(Command):
                     day = min(current_date.day, max_day)
                     current_date = datetime.date(year, month, day)
             else:
-                # Use the original non-normalized projection logic
+                # Use the unnormalized projection logic
+
+                # For trial subscriptions, we don't include costs during the trial
+                # Only start projecting costs from the first renewal after trial ends
+
+                # Project all renewals until the end date
                 while renewal_date <= end_date:
                     # Skip if the renewal date is before the start date
                     if renewal_date >= start_date:
@@ -365,20 +480,35 @@ class ProjectCommand(Command):
             # Get the subscription cost
             cost = float(subscription.cost)
 
-            # Start with the current renewal date
-            renewal_date = datetime.datetime.strptime(subscription.renewal_date, '%Y-%m-%d').date()
-
-            # For trial subscriptions, calculate when they'll convert to paid
+            # Check if this is a trial subscription
+            is_trial = False
             if hasattr(subscription, 'status') and subscription.status == 'trial':
-                # Use the renewal date as the conversion date for trials
-                pass  # The default logic works for trials too
+                is_trial = True
+                # Calculate when the trial ends
+                trial_end_date = self._get_trial_end_date(subscription)
+
+            # Set the initial renewal date
+            if is_trial:
+                # For trial subscriptions, first renewal is when trial ends
+                renewal_date = trial_end_date
+            else:
+                # For active subscriptions, use the current renewal date
+                renewal_date = subscription.renewal_date
 
             if normalize:
                 # Normalize the cost to a monthly amount
                 monthly_cost = self._normalize_cost(cost, subscription.billing_cycle)
 
-                # Calculate months to include in the projection
-                current_date = max(start_date, renewal_date)
+                # For normalized projections, we need to handle the trial period differently
+                if is_trial:
+                    # Calculate the first month after trial ends
+                    first_paid_month = max(start_date, trial_end_date)
+
+                    # Only include months after trial ends
+                    current_date = first_paid_month
+                else:
+                    # For non-trial subscriptions, start from the projection start date
+                    current_date = max(start_date, renewal_date)
 
                 # Add normalized cost for each month in the projection period
                 while current_date <= end_date:
@@ -409,7 +539,12 @@ class ProjectCommand(Command):
                     day = min(current_date.day, max_day)
                     current_date = datetime.date(year, month, day)
             else:
-                # Use the original non-normalized projection logic
+                # Use the unnormalized projection logic
+
+                # For trial subscriptions, we don't include costs during the trial
+                # Only start projecting costs from the first renewal after trial ends
+
+                # Project all renewals until the end date
                 while renewal_date <= end_date:
                     # Skip if the renewal date is before the start date
                     if renewal_date >= start_date:
@@ -425,8 +560,7 @@ class ProjectCommand(Command):
                                 base_currency
                             )
                         else:
-                            # Use original currency (note: this can lead to mixed currency
-                            # totals within a group, which might be confusing)
+                            # Use original currency
                             converted_cost = cost
 
                         # Add to the group total for this month
