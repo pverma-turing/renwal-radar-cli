@@ -37,6 +37,8 @@ class BudgetCommand(Command):
         parser.add_argument("--show-rates", action="store_true",
                             help="Display exchange rates used for currency conversion")
         parser.add_argument("--base-currency", type=str, help="Base currency for totals (defaults to USD)")
+        parser.add_argument("--set-rate", action="append",
+                            help="Temporarily override an exchange rate (format: CURRENCY=RATE). Can be used multiple times.")
 
         return parser
 
@@ -73,12 +75,56 @@ class BudgetCommand(Command):
             # Update args to use uppercase currency code
             args.base_currency = base_currency
 
+        # Validate exchange rate overrides if provided
+        if args.set_rate:
+            # List of supported currencies
+            supported_currencies = list(self.EXCHANGE_RATES.keys())
+
+            # Create a dictionary to store validated rate overrides
+            rate_overrides = {}
+
+            # Check each rate override
+            for rate_str in args.set_rate:
+                # Validate format
+                if "=" not in rate_str:
+                    return False, f"Error: Invalid exchange rate format '{rate_str}'. Use CURRENCY=RATE format (e.g., EUR=1.15)."
+
+                # Split into currency and rate
+                parts = rate_str.split("=", 1)
+                if len(parts) != 2 or not parts[0] or not parts[1]:
+                    return False, f"Error: Invalid exchange rate format '{rate_str}'. Use CURRENCY=RATE format (e.g., EUR=1.15)."
+
+                currency_code = parts[0].strip().upper()
+                rate_str = parts[1].strip()
+
+                # Validate currency code
+                if currency_code not in supported_currencies:
+                    currencies_str = ", ".join(supported_currencies)
+                    return False, f"Error: Unsupported currency '{currency_code}'. Supported currencies are: {currencies_str}"
+
+                # Validate that the rate is a valid float
+                try:
+                    rate = float(rate_str)
+                    if rate <= 0:
+                        return False, f"Error: Exchange rate must be a positive number, got '{rate_str}' for {currency_code}"
+                except ValueError:
+                    return False, f"Error: Invalid exchange rate '{rate_str}' for {currency_code}. Rate must be a valid number."
+
+                # Store the validated override
+                rate_overrides[currency_code] = rate
+
+            # Attach the validated overrides to args for use in execute
+            args.rate_overrides = rate_overrides
+        else:
+            # No overrides provided
+            args.rate_overrides = {}
+
         return True, ""
 
     def execute(self, args):
         """Execute the budget command."""
         db_manager = DatabaseManager()
-
+        self.validate_args(args)
         # Get current date for defaults
         current_date = datetime.datetime.now()
         current_year = current_date.year
@@ -105,7 +151,8 @@ class BudgetCommand(Command):
                 using_default_year=using_default_year,
                 using_default_month=using_default_month,
                 show_rates=args.show_rates,
-                base_currency=args.base_currency
+                base_currency=args.base_currency,
+                rate_overrides=args.rate_overrides
             )
 
     def set_budget(self, db_manager, year, month, currency, amount):
@@ -123,7 +170,7 @@ class BudgetCommand(Command):
 
     def view_budgets(self, db_manager, year=None, month=None, currency=None,
                      detailed=False, using_default_year=True, using_default_month=True,
-                     show_rates=False, base_currency=None):
+                     show_rates=False, base_currency=None, rate_overrides=None):
         """
         View all budgets with usage statistics.
 
@@ -137,10 +184,22 @@ class BudgetCommand(Command):
             using_default_month: Whether the month value is the default (current month)
             show_rates: Whether to display exchange rates
             base_currency: Base currency for totals (defaults to USD)
+            rate_overrides: Dictionary of currency -> rate overrides
         """
         # Set default base currency if not provided
         if base_currency is None:
             base_currency = "USD"
+
+        # Set default rate_overrides if not provided
+        if rate_overrides is None:
+            rate_overrides = {}
+
+        # Create a copy of the default exchange rates
+        effective_rates = self.EXCHANGE_RATES.copy()
+
+        # Apply any overrides
+        for currency_code, rate in rate_overrides.items():
+            effective_rates[currency_code] = rate
         # Get the current date for reference
         current_date = datetime.datetime.now()
         current_month = current_date.month
@@ -277,7 +336,7 @@ class BudgetCommand(Command):
         # Display exchange rates if requested
         if show_rates:
             # Sort currencies alphabetically for consistent display
-            sorted_currencies = sorted(self.EXCHANGE_RATES.keys())
+            sorted_currencies = sorted(effective_rates.keys())
 
             print(f"\nExchange Rates (relative to {base_currency}):")
             for currency_code in sorted_currencies:
@@ -285,17 +344,17 @@ class BudgetCommand(Command):
                     # Calculate the exchange rate relative to the chosen base currency
                     if base_currency == "USD":
                         # Direct conversion from currency to USD
-                        rate = self.EXCHANGE_RATES[currency_code]
+                        rate = effective_rates[currency_code]
                         direction = "to"
                     else:
                         # Need to calculate the reverse rate when base is not USD
                         if currency_code == "USD":
                             # USD to other currency: 1/rate of base currency
-                            rate = 1.0 / self.EXCHANGE_RATES[base_currency]
+                            rate = 1.0 / effective_rates[base_currency]
                             direction = "to"
                         else:
                             # Convert through USD: rate(currency)/rate(base)
-                            rate = self.EXCHANGE_RATES[currency_code] / self.EXCHANGE_RATES[base_currency]
+                            rate = effective_rates[currency_code] / effective_rates[base_currency]
                             direction = "to"
 
                     # Format the rate with appropriate precision based on the value
@@ -308,7 +367,11 @@ class BudgetCommand(Command):
                     if "." in formatted_rate:
                         formatted_rate = formatted_rate.rstrip("0").rstrip(".")
 
-                    print(f"- {currency_code}: 1 {currency_code} = {formatted_rate} {base_currency}")
+                    # Check if this rate is an override
+                    is_override = currency_code in rate_overrides
+                    override_text = " (override)" if is_override else ""
+
+                    print(f"- {currency_code}: 1 {currency_code} = {formatted_rate} {base_currency}{override_text}")
 
         # Display the table
         headers = ["Month", "Currency", "Budget", "Utilized", "Remaining", "% Used", "Overspent?", "# Subscriptions"]
@@ -325,9 +388,9 @@ class BudgetCommand(Command):
             utilized = float(row[3])
 
             try:
-                # Convert amounts to the specified base currency
-                budget_base = self._convert_currency(budget, currency, base_currency)
-                utilized_base = self._convert_currency(utilized, currency, base_currency)
+                # Convert amounts to the specified base currency using the effective rates
+                budget_base = self._convert_currency(budget, currency, base_currency, effective_rates)
+                utilized_base = self._convert_currency(utilized, currency, base_currency, effective_rates)
 
                 # Add to totals
                 total_budget_base += budget_base
@@ -371,14 +434,28 @@ class BudgetCommand(Command):
         print("- 'Utilized' includes all active (non-cancelled) subscriptions in the given month")
         print("- Calculations are based on subscription start and renewal dates")
         print("- All amounts are treated as monthly (no proration by billing cycle)")
+
+        # Add information about exchange rates
+        override_note = ""
+        if rate_overrides:
+            override_count = len(rate_overrides)
+            override_note = f" ({override_count} {'rate' if override_count == 1 else 'rates'} overridden)"
+
         if base_currency == "USD":
-            print("- Totals are converted to USD using fixed exchange rates (1 EUR = 1.1 USD, 1 INR = 0.012 USD, etc.)")
+            print(
+                f"- Totals are converted to USD using exchange rates{override_note} (1 EUR = {effective_rates['EUR']} USD, 1 INR = {effective_rates['INR']} USD, etc.)")
         elif base_currency == "EUR":
+            # Calculate reverse rates
+            usd_to_eur = 1.0 / effective_rates['EUR']
+            inr_to_eur = effective_rates['INR'] / effective_rates['EUR']
             print(
-                "- Totals are converted to EUR using fixed exchange rates (1 USD = 0.91 EUR, 1 INR = 0.011 EUR, etc.)")
+                f"- Totals are converted to EUR using exchange rates{override_note} (1 USD = {usd_to_eur:.2f} EUR, 1 INR = {inr_to_eur:.3f} EUR, etc.)")
         elif base_currency == "INR":
+            # Calculate reverse rates
+            usd_to_inr = 1.0 / effective_rates['INR']
+            eur_to_inr = effective_rates['EUR'] / effective_rates['INR']
             print(
-                "- Totals are converted to INR using fixed exchange rates (1 USD = 83.33 INR, 1 EUR = 91.67 INR, etc.)")
+                f"- Totals are converted to INR using exchange rates{override_note} (1 USD = {usd_to_inr:.2f} INR, 1 EUR = {eur_to_inr:.2f} INR, etc.)")
 
         # Add note about risk levels and color coding
         print("- Risk level indicators:")
@@ -487,13 +564,14 @@ class BudgetCommand(Command):
             # If date is invalid or None, return False
             return False
 
-    def _convert_currency(self, amount, from_currency, to_currency="USD"):
+    def _convert_currency(self, amount, from_currency, to_currency="USD", exchange_rates=None):
         """Convert an amount from one currency to another.
 
         Args:
             amount: The amount to convert
             from_currency: Source currency code
             to_currency: Target currency code, defaults to USD
+            exchange_rates: Optional dictionary of exchange rates to use (defaults to self.EXCHANGE_RATES)
 
         Returns:
             float: Converted amount rounded to 2 decimal places
@@ -501,23 +579,27 @@ class BudgetCommand(Command):
         Raises:
             ValueError: If either currency is not supported
         """
+        # Use default exchange rates if none provided
+        if exchange_rates is None:
+            exchange_rates = self.EXCHANGE_RATES
+
         # If source and target are the same, no conversion needed
         if from_currency == to_currency:
             return amount
 
         # Validate currencies
-        if from_currency not in self.EXCHANGE_RATES:
+        if from_currency not in exchange_rates:
             raise ValueError(f"Unsupported currency: {from_currency}")
-        if to_currency not in self.EXCHANGE_RATES:
+        if to_currency not in exchange_rates:
             raise ValueError(f"Unsupported currency: {to_currency}")
 
         # Convert to USD first (our internal base)
-        amount_in_usd = amount * self.EXCHANGE_RATES[from_currency]
+        amount_in_usd = amount * exchange_rates[from_currency]
 
         # If target is USD, we're done
         if to_currency == "USD":
             return round(amount_in_usd, 2)
 
         # Otherwise convert from USD to target currency
-        amount_in_target = amount_in_usd / self.EXCHANGE_RATES[to_currency]
+        amount_in_target = amount_in_usd / exchange_rates[to_currency]
         return round(amount_in_target, 2)
