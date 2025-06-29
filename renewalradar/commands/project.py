@@ -29,6 +29,9 @@ EXCHANGE_RATES = {
     'MXN': 0.058
 }
 
+# Valid group-by options
+VALID_GROUP_BY = ['tag', 'payment-method']
+
 @register_command
 class ProjectCommand(Command):
     """Command for projecting future subscription renewal costs."""
@@ -59,6 +62,12 @@ class ProjectCommand(Command):
             type=str,
             choices=list(EXCHANGE_RATES.keys()),
             help="Convert all amounts to specified base currency"
+        )
+        parser.add_argument(
+            "--group-by",
+            type=str,
+            choices=VALID_GROUP_BY,
+            help="Group projections by 'tag' or 'payment-method'"
         )
 
     def execute(self, args: argparse.Namespace) -> None:
@@ -101,10 +110,38 @@ class ProjectCommand(Command):
             return
 
         # Project renewals for each subscription
-        projection = self._project_renewals(subscriptions, today, end_date, args.base_currency)
-
-        # Display the projection in a table format
-        self._display_projection(projection, today, end_date, args.base_currency)
+        if args.group_by:
+            # Project with grouping
+            projection = self._project_renewals_grouped(
+                subscriptions,
+                today,
+                end_date,
+                args.base_currency,
+                args.group_by
+            )
+            # Display with grouping
+            self._display_projection_grouped(
+                projection,
+                today,
+                end_date,
+                args.base_currency,
+                args.group_by
+            )
+        else:
+            # Standard projection (no grouping)
+            projection = self._project_renewals(
+                subscriptions,
+                today,
+                end_date,
+                args.base_currency
+            )
+            # Standard display
+            self._display_projection(
+                projection,
+                today,
+                end_date,
+                args.base_currency
+            )
 
     def _print_filter_info(self, args: argparse.Namespace) -> None:
         """Print information about active filters."""
@@ -118,6 +155,9 @@ class ProjectCommand(Command):
 
         if args.base_currency:
             filters_applied.append(f"converted to base currency: '{args.base_currency}'")
+
+        if args.group_by:
+            filters_applied.append(f"grouped by: '{args.group_by}'")
 
         if filters_applied:
             print(f"Applying filters: {', '.join(filters_applied)}")
@@ -147,6 +187,21 @@ class ProjectCommand(Command):
 
         # Round to 2 decimal places
         return round(converted_amount, 2)
+
+    def _get_group_value(self, subscription: Subscription, group_by: str) -> str:
+        """Get the value to use for grouping a subscription."""
+        if group_by == 'tag':
+            # Get the tag value, or 'Uncategorized' if no tag
+            tag = getattr(subscription, 'tag', None)
+            return tag if tag else 'Uncategorized'
+        elif group_by == 'payment-method':
+            # Get the payment method value, or 'Uncategorized' if no payment method
+            payment_method = getattr(subscription, 'payment_method', None)
+            return payment_method if payment_method else 'Uncategorized'
+        else:
+            # Should not happen due to validation, but just in case
+            print(f"Warning: Unknown group by '{group_by}'. Using 'Uncategorized'.")
+            return 'Uncategorized'
 
     def _project_renewals(
             self,
@@ -198,6 +253,71 @@ class ProjectCommand(Command):
                     else:
                         # Use original currency
                         projection[year_month][subscription.currency] += cost
+
+                # Calculate the next renewal date based on the billing cycle
+                renewal_date = self._calculate_next_renewal(renewal_date, subscription.billing_cycle)
+
+        return projection
+
+    def _project_renewals_grouped(
+            self,
+            subscriptions: List[Subscription],
+            start_date: datetime.date,
+            end_date: datetime.date,
+            base_currency: Optional[str] = None,
+            group_by: str = 'tag'
+    ) -> Dict[Tuple[int, int], Dict[str, float]]:
+        """
+        Project renewals for the given subscriptions within the time window,
+        grouped by the specified attribute (tag or payment-method).
+        Returns a dictionary mapping (year, month) to a dictionary of group -> amount.
+        If base_currency is provided, converts all amounts to that currency before grouping.
+        """
+        # Initialize a dictionary to store the projection
+        # Key: (year, month), Value: dictionary of group -> total amount
+        projection = defaultdict(lambda: defaultdict(float))
+
+        for subscription in subscriptions:
+            # Skip canceled subscriptions
+            if hasattr(subscription, 'status') and subscription.status == 'canceled':
+                continue
+
+            # Get the group value for this subscription
+            group_value = self._get_group_value(subscription, group_by)
+
+            # Start with the current renewal date
+            renewal_date = datetime.datetime.strptime(subscription.renewal_date, '%Y-%m-%d').date()
+
+            # For trial subscriptions, calculate when they'll convert to paid
+            if hasattr(subscription, 'status') and subscription.status == 'trial':
+                # Use the renewal date as the conversion date for trials
+                pass  # The default logic works for trials too
+
+            # Project all renewals until the end date
+            while renewal_date <= end_date:
+                # Skip if the renewal date is before the start date
+                if renewal_date >= start_date:
+                    # Add the cost to the appropriate month and group
+                    year_month = (renewal_date.year, renewal_date.month)
+
+                    # Get the cost
+                    cost = float(subscription.cost)
+
+                    # Convert currency if needed
+                    if base_currency:
+                        # Convert to base currency
+                        converted_cost = self._convert_currency(
+                            cost,
+                            subscription.currency,
+                            base_currency
+                        )
+                    else:
+                        # Use original currency (note: this can lead to mixed currency
+                        # totals within a group, which might be confusing)
+                        converted_cost = cost
+
+                    # Add to the group total for this month
+                    projection[year_month][group_value] += converted_cost
 
                 # Calculate the next renewal date based on the billing cycle
                 renewal_date = self._calculate_next_renewal(renewal_date, subscription.billing_cycle)
@@ -286,7 +406,7 @@ class ProjectCommand(Command):
             end_date: datetime.date,
             base_currency: Optional[str] = None
     ) -> None:
-        """Display the projection in a table format."""
+        """Display the projection in a table format (currency-based columns)."""
         if not projection:
             print("No renewals projected in the specified time period.")
             return
@@ -347,3 +467,77 @@ class ProjectCommand(Command):
             print("\nTotal projected costs by currency:")
             for currency, total in sorted(totals.items()):
                 print(f"{currency}: {total:.2f}")
+
+    def _display_projection_grouped(
+            self,
+            projection: Dict[Tuple[int, int], Dict[str, float]],
+            start_date: datetime.date,
+            end_date: datetime.date,
+            base_currency: Optional[str] = None,
+            group_by: str = 'tag'
+    ) -> None:
+        """Display the projection in a table format (group-based columns)."""
+        if not projection:
+            print("No renewals projected in the specified time period.")
+            return
+
+        # Get sorted list of all months in the projection
+        months = sorted(projection.keys())
+
+        # Get all groups used
+        groups = set()
+        for month_data in projection.values():
+            groups.update(month_data.keys())
+        groups = sorted(groups)
+
+        # Create the header row
+        headers = ["Month"] + groups
+
+        # Create the table rows
+        rows = []
+        for year, month in months:
+            # Format the month name
+            month_name = f"{calendar.month_name[month]} {year}"
+
+            # Create a row with the month name and the amount for each group
+            row = [month_name]
+            for group in groups:
+                amount = projection[(year, month)].get(group, 0)
+                row.append(f"{amount:.2f}")
+
+            rows.append(row)
+
+        # Display the table
+        period_months = (end_date - start_date).days // 30
+
+        # Create header text
+        group_type = "tag" if group_by == "tag" else "payment method"
+        header_text = f"\nProjection of renewal costs for the next {period_months} months"
+
+        # Add grouping and currency info
+        header_text += f" (grouped by {group_type}"
+        if base_currency:
+            header_text += f", in {base_currency}"
+        header_text += "):"
+
+        print(header_text)
+        print(tabulate(rows, headers=headers, tablefmt="simple_grid"))
+
+        # Calculate and display totals by group
+        totals = defaultdict(float)
+        for month_data in projection.values():
+            for group, amount in month_data.items():
+                totals[group] += amount
+
+        # Show totals by group
+        print(f"\nTotal projected costs by {group_type}:")
+        total_all = sum(totals.values())
+        for group, total in sorted(totals.items()):
+            # Show percentage of total
+            percentage = (total / total_all * 100) if total_all > 0 else 0
+            currency_label = f" {base_currency}" if base_currency else ""
+            print(f"{group}: {total:.2f}{currency_label} ({percentage:.1f}%)")
+
+        # Show grand total
+        currency_label = f" {base_currency}" if base_currency else ""
+        print(f"\nGrand total: {total_all:.2f}{currency_label}")
