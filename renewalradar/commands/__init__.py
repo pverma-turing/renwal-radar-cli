@@ -8,4 +8,5 @@ from renewalradar.commands.update_status import UpdateStatusCommand
 from renewalradar.commands.summary import SummaryCommand
 from renewalradar.commands.list_usage import ListUsageCommand
 from renewalradar.commands.budget import BudgetCommand
+from renewalradar.commands.delete import DeleteCommand
 
