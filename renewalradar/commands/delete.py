@@ -38,6 +38,11 @@ class DeleteCommand(Command):
             action="store_true",
             help="Confirm deletion of the subscription",
         )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Preview the subscription that would be deleted without making changes",
+        )
 
     def _check_budget_contribution(self, subscription: Dict[str, Any]) -> bool:
         """
@@ -74,6 +79,37 @@ class DeleteCommand(Command):
 
         return False
 
+    def _display_subscription_summary(self, subscription: Dict[str, Any], is_dry_run: bool = False) -> None:
+        """
+        Display a summary of the subscription.
+
+        Args:
+            subscription: The subscription data to display
+            is_dry_run: Whether this is a dry run or actual deletion
+        """
+        print("```")
+        if is_dry_run:
+            print(f"Dry Run: The following subscription would be deleted:")
+        else:
+            print(f"Subscription deleted:")
+
+        print(f"Name: {subscription['name']}")
+        print(f"Cost: {subscription['cost']} {subscription['currency']}")
+        print(f"Billing Cycle: {subscription['billing_cycle']}")
+
+        # Include tags if available
+        if 'tags' in subscription and subscription['tags']:
+            print(f"Tags: {subscription['tags']}")
+
+        # Include any other relevant fields
+        if 'start_date' in subscription:
+            print(f"Start Date: {subscription['start_date']}")
+        if 'renewal_date' in subscription:
+            print(f"Renewal Date: {subscription['renewal_date']}")
+        if 'payment_method' in subscription:
+            print(f"Payment Method: {subscription['payment_method']}")
+        print("```")
+
     def execute(self, args: argparse.Namespace) -> int:
         """Execute the delete command with the given arguments."""
         db_manager = DatabaseManager()
@@ -101,10 +137,21 @@ class DeleteCommand(Command):
             print(f"```\nNo subscription found with {id_type}: {identifier}\n```")
             return 1
 
-        # Store subscription details before deletion for summary
+        # Store subscription details
         subscription = subscriptions[0]
 
-        # Check if deletion is confirmed
+        # Handle dry run mode
+        if args.dry_run:
+            self._display_subscription_summary(subscription, is_dry_run=True)
+
+            # Check if subscription contributes to current month's budget
+            if self._check_budget_contribution(subscription):
+                current_month = datetime.now().strftime("%B %Y")
+                print(f"```\nNote: This subscription contributes to your budget utilization for {current_month}.\n```")
+
+            return 0
+
+        # Check if deletion is confirmed for actual deletion
         if not args.confirm:
             print(f"```\nDeletion not confirmed. Use --confirm to permanently delete the subscription.\n```")
             return 1
@@ -121,24 +168,7 @@ class DeleteCommand(Command):
 
             if success:
                 # Show success message with subscription details
-                print("```")
-                print(f"Subscription deleted:")
-                print(f"Name: {subscription['name']}")
-                print(f"Cost: {subscription['cost']} {subscription['currency']}")
-                print(f"Billing Cycle: {subscription['billing_cycle']}")
-
-                # Include tags if available
-                if 'tags' in subscription and subscription['tags']:
-                    print(f"Tags: {subscription['tags']}")
-
-                # Include any other relevant fields
-                if 'start_date' in subscription:
-                    print(f"Start Date: {subscription['start_date']}")
-                if 'renewal_date' in subscription:
-                    print(f"Renewal Date: {subscription['renewal_date']}")
-                if 'payment_method' in subscription:
-                    print(f"Payment Method: {subscription['payment_method']}")
-                print("```")
+                self._display_subscription_summary(subscription)
 
                 # Display budget warning if applicable
                 if contributes_to_budget:
