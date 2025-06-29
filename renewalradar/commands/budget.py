@@ -36,6 +36,7 @@ class BudgetCommand(Command):
         parser.add_argument("--detailed", action="store_true", help="Show detailed subscription list in budget view")
         parser.add_argument("--show-rates", action="store_true",
                             help="Display exchange rates used for currency conversion")
+        parser.add_argument("--base-currency", type=str, help="Base currency for totals (defaults to USD)")
 
         return parser
 
@@ -58,6 +59,19 @@ class BudgetCommand(Command):
                 return False, "Budget amount must be positive"
             if not args.currency:
                 return False, "Currency must be specified when setting a budget"
+
+        # Validate base currency if provided
+        if args.base_currency:
+            # Normalize to uppercase for case-insensitive comparison
+            base_currency = args.base_currency.upper()
+            supported_base_currencies = ["USD", "EUR", "INR"]
+
+            if base_currency not in supported_base_currencies:
+                currencies_str = ", ".join(supported_base_currencies)
+                return False, f"Error: Unsupported base currency '{args.base_currency}'. Supported values are: {currencies_str} (case-insensitive)"
+
+            # Update args to use uppercase currency code
+            args.base_currency = base_currency
 
         return True, ""
 
@@ -90,7 +104,8 @@ class BudgetCommand(Command):
                 detailed=args.detailed,
                 using_default_year=using_default_year,
                 using_default_month=using_default_month,
-                show_rates=args.show_rates
+                show_rates=args.show_rates,
+                base_currency=args.base_currency
             )
 
     def set_budget(self, db_manager, year, month, currency, amount):
@@ -107,7 +122,8 @@ class BudgetCommand(Command):
             print(f"Error: {e}")
 
     def view_budgets(self, db_manager, year=None, month=None, currency=None,
-                     detailed=False, using_default_year=True, using_default_month=True, show_rates=False):
+                     detailed=False, using_default_year=True, using_default_month=True,
+                     show_rates=False, base_currency=None):
         """
         View all budgets with usage statistics.
 
@@ -120,7 +136,11 @@ class BudgetCommand(Command):
             using_default_year: Whether the year value is the default (current year)
             using_default_month: Whether the month value is the default (current month)
             show_rates: Whether to display exchange rates
+            base_currency: Base currency for totals (defaults to USD)
         """
+        # Set default base currency if not provided
+        if base_currency is None:
+            base_currency = "USD"
         # Get the current date for reference
         current_date = datetime.datetime.now()
         current_month = current_date.month
@@ -259,10 +279,24 @@ class BudgetCommand(Command):
             # Sort currencies alphabetically for consistent display
             sorted_currencies = sorted(self.EXCHANGE_RATES.keys())
 
-            print("\nExchange Rates (relative to USD):")
+            print(f"\nExchange Rates (relative to {base_currency}):")
             for currency_code in sorted_currencies:
-                if currency_code != "USD":  # Skip USD as it's the base currency
-                    rate = self.EXCHANGE_RATES[currency_code]
+                if currency_code != base_currency:  # Skip the base currency itself
+                    # Calculate the exchange rate relative to the chosen base currency
+                    if base_currency == "USD":
+                        # Direct conversion from currency to USD
+                        rate = self.EXCHANGE_RATES[currency_code]
+                        direction = "to"
+                    else:
+                        # Need to calculate the reverse rate when base is not USD
+                        if currency_code == "USD":
+                            # USD to other currency: 1/rate of base currency
+                            rate = 1.0 / self.EXCHANGE_RATES[base_currency]
+                            direction = "to"
+                        else:
+                            # Convert through USD: rate(currency)/rate(base)
+                            rate = self.EXCHANGE_RATES[currency_code] / self.EXCHANGE_RATES[base_currency]
+                            direction = "to"
 
                     # Format the rate with appropriate precision based on the value
                     if rate >= 0.1:  # For rates like EUR (1.1), GBP (1.28), etc.
@@ -274,15 +308,15 @@ class BudgetCommand(Command):
                     if "." in formatted_rate:
                         formatted_rate = formatted_rate.rstrip("0").rstrip(".")
 
-                    print(f"- {currency_code}: 1 {currency_code} = {formatted_rate} USD")
+                    print(f"- {currency_code}: 1 {currency_code} = {formatted_rate} {base_currency}")
 
         # Display the table
         headers = ["Month", "Currency", "Budget", "Utilized", "Remaining", "% Used", "Overspent?", "# Subscriptions"]
         print(tabulate(table_data, headers=headers, tablefmt="pretty"))
 
-        # Calculate totals in base currency (USD)
-        total_budget_usd = 0
-        total_utilized_usd = 0
+        # Calculate totals in specified base currency
+        total_budget_base = 0
+        total_utilized_base = 0
 
         # Calculate totals in base currency
         for row in table_data:
@@ -291,31 +325,45 @@ class BudgetCommand(Command):
             utilized = float(row[3])
 
             try:
-                # Convert amounts to USD
-                budget_usd = self._convert_currency(budget, currency, "USD")
-                utilized_usd = self._convert_currency(utilized, currency, "USD")
+                # Convert amounts to the specified base currency
+                budget_base = self._convert_currency(budget, currency, base_currency)
+                utilized_base = self._convert_currency(utilized, currency, base_currency)
 
                 # Add to totals
-                total_budget_usd += budget_usd
-                total_utilized_usd += utilized_usd
+                total_budget_base += budget_base
+                total_utilized_base += utilized_base
             except ValueError:
                 # Skip currencies that we don't have exchange rates for
-                print(f"Warning: Skipping {currency} - no exchange rate available for conversion to USD")
+                print(f"Warning: Skipping {currency} - no exchange rate available for conversion to {base_currency}")
 
         # Calculate remaining and percentage used
-        total_remaining_usd = total_budget_usd - total_utilized_usd
-        total_percent_used = (total_utilized_usd / total_budget_usd * 100) if total_budget_usd > 0 else 0
+        total_remaining_base = total_budget_base - total_utilized_base
+        total_percent_used = (total_utilized_base / total_budget_base * 100) if total_budget_base > 0 else 0
 
-        # Determine if overspent
-        is_overspent = total_remaining_usd < 0
-        overspent_text = "Yes [OVER]" if is_overspent else "No"
+        # Determine if overspent or at risk
+        is_overspent = total_remaining_base < 0
+        is_risk = total_percent_used > 90.0 and total_percent_used <= 100.0
+
+        # Prepare formatted output with appropriate coloring
+        if is_overspent:
+            overspent_text = f"{Fore.RED}Yes [OVER]{Style.RESET_ALL}"
+            remaining_text = f"{Fore.RED}{total_remaining_base:.2f}{Style.RESET_ALL}"
+            percent_text = f"{Fore.RED}{total_percent_used:.2f}%{Style.RESET_ALL}"
+        elif is_risk:
+            overspent_text = f"{Fore.YELLOW}No [RISK]{Style.RESET_ALL}"
+            remaining_text = f"{Fore.YELLOW}{total_remaining_base:.2f}{Style.RESET_ALL}"
+            percent_text = f"{Fore.YELLOW}{total_percent_used:.2f}%{Style.RESET_ALL}"
+        else:
+            overspent_text = "No"
+            remaining_text = f"{total_remaining_base:.2f}"
+            percent_text = f"{total_percent_used:.2f}%"
 
         # Display total row
-        print("\nTOTAL (USD): " +
-              f"Budget = {total_budget_usd:.2f}, " +
-              f"Utilized = {total_utilized_usd:.2f}, " +
-              f"Remaining = {total_remaining_usd:.2f}, " +
-              f"% Used = {total_percent_used:.2f}%, " +
+        print(f"\nTOTAL ({base_currency}): " +
+              f"Budget = {total_budget_base:.2f}, " +
+              f"Utilized = {total_utilized_base:.2f}, " +
+              f"Remaining = {remaining_text}, " +
+              f"% Used = {percent_text}, " +
               f"Overspent? = {overspent_text}")
 
         # Add a note about what's included in calculations
@@ -323,7 +371,14 @@ class BudgetCommand(Command):
         print("- 'Utilized' includes all active (non-cancelled) subscriptions in the given month")
         print("- Calculations are based on subscription start and renewal dates")
         print("- All amounts are treated as monthly (no proration by billing cycle)")
-        print("- Totals are converted to USD using fixed exchange rates")
+        if base_currency == "USD":
+            print("- Totals are converted to USD using fixed exchange rates (1 EUR = 1.1 USD, 1 INR = 0.012 USD, etc.)")
+        elif base_currency == "EUR":
+            print(
+                "- Totals are converted to EUR using fixed exchange rates (1 USD = 0.91 EUR, 1 INR = 0.011 EUR, etc.)")
+        elif base_currency == "INR":
+            print(
+                "- Totals are converted to INR using fixed exchange rates (1 USD = 83.33 INR, 1 EUR = 91.67 INR, etc.)")
 
         # Add note about risk levels and color coding
         print("- Risk level indicators:")
@@ -446,13 +501,17 @@ class BudgetCommand(Command):
         Raises:
             ValueError: If either currency is not supported
         """
+        # If source and target are the same, no conversion needed
+        if from_currency == to_currency:
+            return amount
+
         # Validate currencies
         if from_currency not in self.EXCHANGE_RATES:
             raise ValueError(f"Unsupported currency: {from_currency}")
         if to_currency not in self.EXCHANGE_RATES:
             raise ValueError(f"Unsupported currency: {to_currency}")
 
-        # Convert to base currency (USD) first if necessary
+        # Convert to USD first (our internal base)
         amount_in_usd = amount * self.EXCHANGE_RATES[from_currency]
 
         # If target is USD, we're done
