@@ -11,7 +11,18 @@ from ..registry import register_command
 class BudgetCommand(Command):
     """Command for managing monthly budget caps per currency."""
     name = "budget"
-    description = "manage budget"
+    description = "Manage subscription budgets"
+
+    # Exchange rates for different currencies (1 unit of currency = X USD)
+    EXCHANGE_RATES = {
+        "USD": 1.0,
+        "EUR": 1.1,  # 1 EUR = 1.1 USD
+        "INR": 0.012,  # 1 INR = 0.012 USD
+        "GBP": 1.28,  # 1 GBP = 1.28 USD
+        "CAD": 0.74,  # 1 CAD = 0.74 USD
+        "AUD": 0.67,  # 1 AUD = 0.67 USD
+        "JPY": 0.0071  # 1 JPY = 0.0071 USD
+    }
 
     def register_arguments(self, parser):
         """Configure argument parser for the budget command."""
@@ -23,6 +34,8 @@ class BudgetCommand(Command):
         parser.add_argument("--year", type=int, help="Year for the budget (defaults to current year)")
         parser.add_argument("--month", type=int, help="Month for the budget (1-12, defaults to current month)")
         parser.add_argument("--detailed", action="store_true", help="Show detailed subscription list in budget view")
+        parser.add_argument("--show-rates", action="store_true",
+                            help="Display exchange rates used for currency conversion")
 
         return parser
 
@@ -76,7 +89,8 @@ class BudgetCommand(Command):
                 currency=args.currency,
                 detailed=args.detailed,
                 using_default_year=using_default_year,
-                using_default_month=using_default_month
+                using_default_month=using_default_month,
+                show_rates=args.show_rates
             )
 
     def set_budget(self, db_manager, year, month, currency, amount):
@@ -240,6 +254,28 @@ class BudgetCommand(Command):
         print(f"\n{title}")
         print("=" * len(title))
 
+        # Display exchange rates if requested
+        if show_rates:
+            # Sort currencies alphabetically for consistent display
+            sorted_currencies = sorted(self.EXCHANGE_RATES.keys())
+
+            print("\nExchange Rates (relative to USD):")
+            for currency_code in sorted_currencies:
+                if currency_code != "USD":  # Skip USD as it's the base currency
+                    rate = self.EXCHANGE_RATES[currency_code]
+
+                    # Format the rate with appropriate precision based on the value
+                    if rate >= 0.1:  # For rates like EUR (1.1), GBP (1.28), etc.
+                        formatted_rate = f"{rate:.2f}"
+                    else:  # For small rates like INR (0.012), JPY (0.0071), etc.
+                        formatted_rate = f"{rate:.3f}"
+
+                    # Remove trailing zeros after the decimal point
+                    if "." in formatted_rate:
+                        formatted_rate = formatted_rate.rstrip("0").rstrip(".")
+
+                    print(f"- {currency_code}: 1 {currency_code} = {formatted_rate} USD")
+
         # Display the table
         headers = ["Month", "Currency", "Budget", "Utilized", "Remaining", "% Used", "Overspent?", "# Subscriptions"]
         print(tabulate(table_data, headers=headers, tablefmt="pretty"))
@@ -386,3 +422,43 @@ class BudgetCommand(Command):
                     print("    No active subscriptions found for this period.")
 
                 print("-" * 50)
+
+    def _is_date_within_range(self, date_str, start_date, end_date):
+        """Check if a date string is within the given range."""
+        try:
+            date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+            return start_date <= date_obj <= end_date
+        except (ValueError, TypeError):
+            # If date is invalid or None, return False
+            return False
+
+    def _convert_currency(self, amount, from_currency, to_currency="USD"):
+        """Convert an amount from one currency to another.
+
+        Args:
+            amount: The amount to convert
+            from_currency: Source currency code
+            to_currency: Target currency code, defaults to USD
+
+        Returns:
+            float: Converted amount rounded to 2 decimal places
+
+        Raises:
+            ValueError: If either currency is not supported
+        """
+        # Validate currencies
+        if from_currency not in self.EXCHANGE_RATES:
+            raise ValueError(f"Unsupported currency: {from_currency}")
+        if to_currency not in self.EXCHANGE_RATES:
+            raise ValueError(f"Unsupported currency: {to_currency}")
+
+        # Convert to base currency (USD) first if necessary
+        amount_in_usd = amount * self.EXCHANGE_RATES[from_currency]
+
+        # If target is USD, we're done
+        if to_currency == "USD":
+            return round(amount_in_usd, 2)
+
+        # Otherwise convert from USD to target currency
+        amount_in_target = amount_in_usd / self.EXCHANGE_RATES[to_currency]
+        return round(amount_in_target, 2)
