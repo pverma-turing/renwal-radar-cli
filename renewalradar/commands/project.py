@@ -2,7 +2,7 @@ import argparse
 import datetime
 import calendar
 from collections import defaultdict
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, NamedTuple
 
 from tabulate import tabulate  # Assuming tabulate is used for other table displays
 
@@ -35,7 +35,7 @@ VALID_GROUP_BY = ['tag', 'payment-method']
 
 # Billing cycle to months mapping for normalization
 BILLING_CYCLE_MONTHS = {
-    'weekly': 1/4.33,  # Average weeks per month (52/12)
+    'weekly': 1 / 4.33,  # Average weeks per month (52/12)
     'monthly': 1,
     'quarterly': 3,
     'biannual': 6,
@@ -43,6 +43,25 @@ BILLING_CYCLE_MONTHS = {
     'yearly': 12,
     'annual': 12
 }
+
+
+class ProjectionConfig(NamedTuple):
+    """Configuration for a projection calculation."""
+    start_date: datetime.date
+    end_date: datetime.date
+    base_currency: Optional[str] = None
+    group_by: Optional[str] = None
+    normalize: bool = False
+
+
+class RenewalEvent(NamedTuple):
+    """Represents a subscription renewal event."""
+    date: datetime.date
+    cost: float
+    currency: str
+    group_value: Optional[str] = None
+    is_normalized: bool = False
+
 
 @register_command
 class ProjectCommand(Command):
@@ -100,7 +119,36 @@ class ProjectCommand(Command):
         # Calculate the end date for projections
         end_date = today + datetime.timedelta(days=args.months * 30)  # Approximation
 
-        # Get all active or trial subscriptions with specified filters
+        # Create projection configuration
+        config = ProjectionConfig(
+            start_date=today,
+            end_date=end_date,
+            base_currency=args.base_currency,
+            group_by=args.group_by,
+            normalize=args.normalize
+        )
+
+        # Get filtered subscriptions
+        subscriptions = self._get_filtered_subscriptions(args)
+
+        # Show filter info for user awareness
+        self._print_filter_info(args)
+
+        if not subscriptions:
+            print("No subscriptions found matching the specified criteria.")
+            return
+
+        # Generate renewal events for each subscription
+        events = self._generate_renewal_events(subscriptions, config)
+
+        # Process events into a projection
+        projection = self._process_events_to_projection(events, config)
+
+        # Display the projection
+        self._display_projection(projection, config)
+
+    def _get_filtered_subscriptions(self, args: argparse.Namespace) -> List[Subscription]:
+        """Get subscriptions with applied filters."""
         db_manager = DatabaseManager()
 
         # Prepare filters
@@ -117,48 +165,7 @@ class ProjectCommand(Command):
             filters["payment_method"] = args.payment_method
 
         # Get filtered subscriptions
-        subscriptions = db_manager.get_filtered_subscriptions(filters=filters)
-
-        # Show filter info for user awareness
-        self._print_filter_info(args)
-
-        if not subscriptions:
-            print("No subscriptions found matching the specified criteria.")
-            return
-
-        # Project renewals for each subscription
-        if args.group_by:
-            # Project with grouping
-            projection = self._project_renewals_grouped(
-                subscriptions,
-                today,
-                end_date,
-                args.base_currency,
-                args.group_by
-            )
-            # Display with grouping
-            self._display_projection_grouped(
-                projection,
-                today,
-                end_date,
-                args.base_currency,
-                args.group_by
-            )
-        else:
-            # Standard projection (no grouping)
-            projection = self._project_renewals(
-                subscriptions,
-                today,
-                end_date,
-                args.base_currency
-            )
-            # Standard display
-            self._display_projection(
-                projection,
-                today,
-                end_date,
-                args.base_currency
-            )
+        return db_manager.get_filtered_subscriptions(filters)
 
     def _print_filter_info(self, args: argparse.Namespace) -> None:
         """Print information about active filters."""
@@ -210,6 +217,9 @@ class ProjectCommand(Command):
 
     def _get_group_value(self, subscription: Subscription, group_by: str) -> str:
         """Get the value to use for grouping a subscription."""
+        if not group_by:
+            return None
+
         if group_by == 'tag':
             # Get the tag value, or 'Uncategorized' if no tag
             tag = getattr(subscription, 'tag', None)
@@ -236,7 +246,7 @@ class ProjectCommand(Command):
     def _normalize_cost(self, cost: float, billing_cycle: str) -> float:
         """Normalize a cost to a monthly amount based on the billing cycle."""
         months = self._get_billing_cycle_months(billing_cycle)
-        if months == 0:
+        if months <= 0:
             return cost  # Avoid division by zero
 
         # Calculate monthly cost and round to 2 decimal places
@@ -336,241 +346,6 @@ class ProjectCommand(Command):
 
             return datetime.date(year, month, day)
 
-    def _project_renewals(
-            self,
-            subscriptions: List[Subscription],
-            start_date: datetime.date,
-            end_date: datetime.date,
-            base_currency: Optional[str] = None,
-            normalize: bool = False
-    ) -> Dict[Tuple[int, int], Dict[str, float]]:
-        """
-        Project renewals for the given subscriptions within the time window.
-        Returns a dictionary mapping (year, month) to a dictionary of currency -> amount.
-        If base_currency is provided, converts all amounts to that currency.
-        If normalize is True, prorates costs for longer billing cycles to monthly amounts.
-        """
-        # Initialize a dictionary to store the projection
-        # Key: (year, month), Value: dictionary of currency -> total amount
-        projection = defaultdict(lambda: defaultdict(float))
-
-        for subscription in subscriptions:
-            # Skip canceled subscriptions
-            if hasattr(subscription, 'status') and subscription.status == 'canceled':
-                continue
-
-            # Get the subscription cost
-            cost = float(subscription.cost)
-
-            # Check if this is a trial subscription
-            is_trial = False
-            if hasattr(subscription, 'status') and subscription.status == 'trial':
-                is_trial = True
-                # Calculate when the trial ends
-                trial_end_date = self._get_trial_end_date(subscription)
-
-            # Set the initial renewal date
-            if is_trial:
-                # For trial subscriptions, first renewal is when trial ends
-                renewal_date = trial_end_date
-            else:
-                # For active subscriptions, use the current renewal date
-                renewal_date = subscription.renewal_date
-
-            if normalize:
-                # Normalize the cost to a monthly amount
-                monthly_cost = self._normalize_cost(cost, subscription.billing_cycle)
-
-                # For normalized projections, we need to handle the trial period differently
-                if is_trial:
-                    # Calculate the first month after trial ends
-                    first_paid_month = max(start_date, trial_end_date)
-
-                    # Only include months after trial ends
-                    current_date = first_paid_month
-                else:
-                    # For non-trial subscriptions, start from the projection start date
-                    current_date = max(start_date, renewal_date)
-
-                # Add normalized cost for each month in the projection period
-                while current_date <= end_date:
-                    year_month = (current_date.year, current_date.month)
-
-                    # Convert currency if needed
-                    if base_currency:
-                        converted_cost = self._convert_currency(
-                            monthly_cost,
-                            subscription.currency,
-                            base_currency
-                        )
-                        projection[year_month][base_currency] += converted_cost
-                    else:
-                        projection[year_month][subscription.currency] += monthly_cost
-
-                    # Move to the next month
-                    month = current_date.month + 1
-                    year = current_date.year
-                    if month > 12:
-                        month = 1
-                        year += 1
-
-                    # Last day might exceed the days in the month, so we handle that
-                    max_day = calendar.monthrange(year, month)[1]
-                    day = min(current_date.day, max_day)
-                    current_date = datetime.date(year, month, day)
-            else:
-                # Use the unnormalized projection logic
-
-                # For trial subscriptions, we don't include costs during the trial
-                # Only start projecting costs from the first renewal after trial ends
-
-                # Project all renewals until the end date
-                while renewal_date <= end_date:
-                    # Skip if the renewal date is before the start date
-                    if renewal_date >= start_date:
-                        # Add the cost to the appropriate month and currency
-                        year_month = (renewal_date.year, renewal_date.month)
-
-                        # Convert currency if needed
-                        if base_currency:
-                            # Convert to base currency
-                            converted_cost = self._convert_currency(
-                                cost,
-                                subscription.currency,
-                                base_currency
-                            )
-                            projection[year_month][base_currency] += converted_cost
-                        else:
-                            # Use original currency
-                            projection[year_month][subscription.currency] += cost
-
-                    # Calculate the next renewal date based on the billing cycle
-                    renewal_date = self._calculate_next_renewal(renewal_date, subscription.billing_cycle)
-
-        return projection
-
-    def _project_renewals_grouped(
-            self,
-            subscriptions: List[Subscription],
-            start_date: datetime.date,
-            end_date: datetime.date,
-            base_currency: Optional[str] = None,
-            group_by: str = 'tag',
-            normalize: bool = False
-    ) -> Dict[Tuple[int, int], Dict[str, float]]:
-        """
-        Project renewals for the given subscriptions within the time window,
-        grouped by the specified attribute (tag or payment-method).
-        Returns a dictionary mapping (year, month) to a dictionary of group -> amount.
-        If base_currency is provided, converts all amounts to that currency before grouping.
-        If normalize is True, prorates costs for longer billing cycles to monthly amounts.
-        """
-        # Initialize a dictionary to store the projection
-        # Key: (year, month), Value: dictionary of group -> total amount
-        projection = defaultdict(lambda: defaultdict(float))
-
-        for subscription in subscriptions:
-            # Skip canceled subscriptions
-            if hasattr(subscription, 'status') and subscription.status == 'canceled':
-                continue
-
-            # Get the group value for this subscription
-            group_value = self._get_group_value(subscription, group_by)
-
-            # Get the subscription cost
-            cost = float(subscription.cost)
-
-            # Check if this is a trial subscription
-            is_trial = False
-            if hasattr(subscription, 'status') and subscription.status == 'trial':
-                is_trial = True
-                # Calculate when the trial ends
-                trial_end_date = self._get_trial_end_date(subscription)
-
-            # Set the initial renewal date
-            if is_trial:
-                # For trial subscriptions, first renewal is when trial ends
-                renewal_date = trial_end_date
-            else:
-                # For active subscriptions, use the current renewal date
-                renewal_date = subscription.renewal_date
-
-            if normalize:
-                # Normalize the cost to a monthly amount
-                monthly_cost = self._normalize_cost(cost, subscription.billing_cycle)
-
-                # For normalized projections, we need to handle the trial period differently
-                if is_trial:
-                    # Calculate the first month after trial ends
-                    first_paid_month = max(start_date, trial_end_date)
-
-                    # Only include months after trial ends
-                    current_date = first_paid_month
-                else:
-                    # For non-trial subscriptions, start from the projection start date
-                    current_date = max(start_date, renewal_date)
-
-                # Add normalized cost for each month in the projection period
-                while current_date <= end_date:
-                    year_month = (current_date.year, current_date.month)
-
-                    # Convert currency if needed
-                    if base_currency:
-                        converted_cost = self._convert_currency(
-                            monthly_cost,
-                            subscription.currency,
-                            base_currency
-                        )
-                    else:
-                        converted_cost = monthly_cost
-
-                    # Add to the group total for this month
-                    projection[year_month][group_value] += converted_cost
-
-                    # Move to the next month
-                    month = current_date.month + 1
-                    year = current_date.year
-                    if month > 12:
-                        month = 1
-                        year += 1
-
-                    # Last day might exceed the days in the month, so we handle that
-                    max_day = calendar.monthrange(year, month)[1]
-                    day = min(current_date.day, max_day)
-                    current_date = datetime.date(year, month, day)
-            else:
-                # Use the unnormalized projection logic
-
-                # For trial subscriptions, we don't include costs during the trial
-                # Only start projecting costs from the first renewal after trial ends
-
-                # Project all renewals until the end date
-                while renewal_date <= end_date:
-                    # Skip if the renewal date is before the start date
-                    if renewal_date >= start_date:
-                        # Add the cost to the appropriate month and group
-                        year_month = (renewal_date.year, renewal_date.month)
-
-                        # Convert currency if needed
-                        if base_currency:
-                            # Convert to base currency
-                            converted_cost = self._convert_currency(
-                                cost,
-                                subscription.currency,
-                                base_currency
-                            )
-                        else:
-                            # Use original currency
-                            converted_cost = cost
-
-                        # Add to the group total for this month
-                        projection[year_month][group_value] += converted_cost
-
-                    # Calculate the next renewal date based on the billing cycle
-                    renewal_date = self._calculate_next_renewal(renewal_date, subscription.billing_cycle)
-
-        return projection
-
     def _calculate_next_renewal(
             self,
             current_date: datetime.date,
@@ -646,15 +421,147 @@ class ProjectCommand(Command):
             print(f"Warning: Unknown billing cycle '{billing_cycle}'. Assuming monthly.")
             return self._calculate_next_renewal(current_date, 'monthly')
 
+    def _add_month_to_date(self, date: datetime.date) -> datetime.date:
+        """Add one month to a date, handling month transitions properly."""
+        month = date.month + 1
+        year = date.year
+        if month > 12:
+            month = 1
+            year += 1
+
+        # Handle month length differences
+        max_day = calendar.monthrange(year, month)[1]
+        day = min(date.day, max_day)
+
+        return datetime.date(year, month, day)
+
+    def _generate_renewal_events(
+            self,
+            subscriptions: List[Subscription],
+            config: ProjectionConfig
+    ) -> List[RenewalEvent]:
+        """
+        Generate a chronological list of renewal events for the given subscriptions.
+        Takes into account trial periods, normalization, and currency conversion.
+        """
+        events = []
+
+        for subscription in subscriptions:
+            # Skip canceled subscriptions
+            if hasattr(subscription, 'status') and subscription.status == 'canceled':
+                continue
+
+            # Get subscription details
+            cost = float(subscription.cost)
+            currency = subscription.currency
+            billing_cycle = subscription.billing_cycle
+
+            # Get group value if grouping is enabled
+            group_value = self._get_group_value(subscription, config.group_by)
+
+            # Handle trial subscriptions
+            is_trial = hasattr(subscription, 'status') and subscription.status == 'trial'
+
+            # Determine the first renewal date
+            if is_trial:
+                # For trial subscriptions, first renewal is when trial ends
+                first_renewal_date = self._get_trial_end_date(subscription)
+            else:
+                # For active subscriptions, use the current renewal date
+                first_renewal_date = parse_date(subscription.renewal_date)
+
+            if config.normalize:
+                # For normalized projections, we create monthly events
+                monthly_cost = self._normalize_cost(cost, billing_cycle)
+
+                # Apply currency conversion if needed
+                if config.base_currency:
+                    monthly_cost = self._convert_currency(monthly_cost, currency, config.base_currency)
+                    event_currency = config.base_currency
+                else:
+                    event_currency = currency
+
+                # For trial subscriptions, start from trial end date
+                if is_trial:
+                    current_date = max(config.start_date, first_renewal_date)
+                else:
+                    current_date = max(config.start_date, subscription.renewal_date)
+
+                # Create monthly events until the end date
+                while current_date <= config.end_date:
+                    events.append(RenewalEvent(
+                        date=current_date,
+                        cost=monthly_cost,
+                        currency=event_currency,
+                        group_value=group_value,
+                        is_normalized=True
+                    ))
+
+                    # Move to the next month
+                    current_date = self._add_month_to_date(current_date)
+            else:
+                # For non-normalized projections, we create events at each renewal date
+                renewal_date = first_renewal_date
+
+                # Apply currency conversion if needed
+                if config.base_currency:
+                    event_cost = self._convert_currency(cost, currency, config.base_currency)
+                    event_currency = config.base_currency
+                else:
+                    event_cost = cost
+                    event_currency = currency
+
+                # Create events for each renewal date until the end date
+                while renewal_date <= config.end_date:
+                    if renewal_date >= config.start_date:
+                        events.append(RenewalEvent(
+                            date=renewal_date,
+                            cost=event_cost,
+                            currency=event_currency,
+                            group_value=group_value,
+                            is_normalized=False
+                        ))
+
+                    # Calculate next renewal date
+                    renewal_date = self._calculate_next_renewal(renewal_date, billing_cycle)
+
+        # Sort events by date
+        return sorted(events, key=lambda e: e.date)
+
+    def _process_events_to_projection(
+            self,
+            events: List[RenewalEvent],
+            config: ProjectionConfig
+    ) -> Dict[Tuple[int, int], Dict[str, float]]:
+        """
+        Process renewal events into a month-by-month projection.
+        """
+        # Initialize projection dictionary
+        # Key: (year, month), Value: dictionary of currency/group -> amount
+        projection = defaultdict(lambda: defaultdict(float))
+
+        for event in events:
+            # Extract year and month for grouping
+            year_month = (event.date.year, event.date.month)
+
+            if config.group_by:
+                # When grouping, use group_value as the key
+                key = event.group_value
+            else:
+                # When not grouping, use currency as the key
+                key = event.currency
+
+            # Add the cost to the appropriate bucket
+            projection[year_month][key] += event.cost
+
+        return projection
+
     def _display_projection(
             self,
             projection: Dict[Tuple[int, int], Dict[str, float]],
-            start_date: datetime.date,
-            end_date: datetime.date,
-            base_currency: Optional[str] = None,
-            normalize: bool = False
+            config: ProjectionConfig
     ) -> None:
-        """Display the projection in a table format (currency-based columns)."""
+        """Display the projection in a table format."""
         if not projection:
             print("No renewals projected in the specified time period.")
             return
@@ -662,20 +569,14 @@ class ProjectCommand(Command):
         # Get sorted list of all months in the projection
         months = sorted(projection.keys())
 
-        # Get currencies to display
-        currencies = []
-        if base_currency:
-            # When a base currency is specified, we only show that one
-            currencies = [base_currency]
-        else:
-            # Otherwise show all currencies used
-            currency_set = set()
-            for month_data in projection.values():
-                currency_set.update(month_data.keys())
-            currencies = sorted(currency_set)
+        # Get all column headers (either currencies or groups)
+        columns = set()
+        for month_data in projection.values():
+            columns.update(month_data.keys())
+        columns = sorted(columns)
 
         # Create the header row
-        headers = ["Month"] + currencies
+        headers = ["Month"] + columns
 
         # Create the table rows
         rows = []
@@ -683,124 +584,75 @@ class ProjectCommand(Command):
             # Format the month name
             month_name = f"{calendar.month_name[month]} {year}"
 
-            # Create a row with the month name and the amount for each currency
+            # Create a row with the month name and the amount for each column
             row = [month_name]
-            for currency in currencies:
-                amount = projection[(year, month)].get(currency, 0)
+            for column in columns:
+                amount = projection[(year, month)].get(column, 0)
                 row.append(f"{amount:.2f}")
 
             rows.append(row)
 
         # Display the table
-        period_months = (end_date - start_date).days // 30
+        period_months = (config.end_date - config.start_date).days // 30
 
-        # Customize message based on whether we're using base currency and normalization
-        header_text = f"\nProjection of renewal costs for the next {period_months} months"
+        # Create header text based on configuration
+        if config.group_by:
+            group_type = "tag" if config.group_by == "tag" else "payment method"
+            header_text = f"\nProjection of renewal costs for the next {period_months} months"
 
-        if normalize:
-            header_text += " (normalized to monthly amounts"
+            if config.normalize:
+                header_text += " (normalized to monthly amounts"
+            else:
+                header_text += " (actual renewal amounts"
+
+            header_text += f", grouped by {group_type}"
+
+            if config.base_currency:
+                header_text += f", in {config.base_currency}"
         else:
-            header_text += " (actual renewal amounts"
+            header_text = f"\nProjection of renewal costs for the next {period_months} months"
 
-        if base_currency:
-            header_text += f", in {base_currency}"
+            if config.normalize:
+                header_text += " (normalized to monthly amounts"
+            else:
+                header_text += " (actual renewal amounts"
+
+            if config.base_currency:
+                header_text += f", in {config.base_currency}"
 
         header_text += "):"
 
         print(header_text)
         print(tabulate(rows, headers=headers, tablefmt="simple_grid"))
 
-        # Calculate and display totals by currency
+        # Calculate and display totals
         totals = defaultdict(float)
         for month_data in projection.values():
-            for currency, amount in month_data.items():
-                totals[currency] += amount
+            for key, amount in month_data.items():
+                totals[key] += amount
 
         # Show totals
-        if base_currency:
-            print(f"\nTotal projected cost: {totals[base_currency]:.2f} {base_currency}")
+        if config.group_by:
+            # When grouped, show totals by group with percentages
+            print(f"\nTotal projected costs by {group_type}:")
+            total_all = sum(totals.values())
+            for group, total in sorted(totals.items()):
+                # Show percentage of total
+                percentage = (total / total_all * 100) if total_all > 0 else 0
+                currency_label = f" {config.base_currency}" if config.base_currency else ""
+                print(f"{group}: {total:.2f}{currency_label} ({percentage:.1f}%)")
+
+            # Show grand total
+            currency_label = f" {config.base_currency}" if config.base_currency else ""
+            print(f"\nGrand total: {total_all:.2f}{currency_label}")
         else:
-            print("\nTotal projected costs by currency:")
-            for currency, total in sorted(totals.items()):
-                print(f"{currency}: {total:.2f}")
-
-    def _display_projection_grouped(
-            self,
-            projection: Dict[Tuple[int, int], Dict[str, float]],
-            start_date: datetime.date,
-            end_date: datetime.date,
-            base_currency: Optional[str] = None,
-            group_by: str = 'tag',
-            normalize: bool = False
-    ) -> None:
-        """Display the projection in a table format (group-based columns)."""
-        if not projection:
-            print("No renewals projected in the specified time period.")
-            return
-
-        # Get sorted list of all months in the projection
-        months = sorted(projection.keys())
-
-        # Get all groups used
-        groups = set()
-        for month_data in projection.values():
-            groups.update(month_data.keys())
-        groups = sorted(groups)
-
-        # Create the header row
-        headers = ["Month"] + groups
-
-        # Create the table rows
-        rows = []
-        for year, month in months:
-            # Format the month name
-            month_name = f"{calendar.month_name[month]} {year}"
-
-            # Create a row with the month name and the amount for each group
-            row = [month_name]
-            for group in groups:
-                amount = projection[(year, month)].get(group, 0)
-                row.append(f"{amount:.2f}")
-
-            rows.append(row)
-
-        # Display the table
-        period_months = (end_date - start_date).days // 30
-
-        # Create header text
-        group_type = "tag" if group_by == "tag" else "payment method"
-        header_text = f"\nProjection of renewal costs for the next {period_months} months"
-
-        # Add normalization info
-        if normalize:
-            header_text += " (normalized to monthly amounts"
-        else:
-            header_text += " (actual renewal amounts"
-
-        # Add grouping and currency info
-        header_text += f", grouped by {group_type}"
-        if base_currency:
-            header_text += f", in {base_currency}"
-        header_text += "):"
-
-        print(header_text)
-        print(tabulate(rows, headers=headers, tablefmt="simple_grid"))
-
-        # Calculate and display totals by group
-        totals = defaultdict(float)
-        for month_data in projection.values():
-            for group, amount in month_data.items():
-                totals[group] += amount
-
-        # Show totals by group
-        print(f"\nTotal projected costs by {group_type}:")
-        total_all = sum(totals.values())
-        for group, total in sorted(totals.items()):
-            # Show percentage of total
-            percentage = (total / total_all * 100) if total_all > 0 else 0
-            currency_label = f" {base_currency}" if base_currency else ""
-            print(f"{group}: {total:.2f}{currency_label} ({percentage:.1f}%)")
-
-        # Show grand total
-        currency_label = f" {base_currency}" if base_currency else ""
-        print(f"\nGrand total: {total_all:.2f}{currency_label}")
+            # When not grouped, show totals by currency
+            if config.base_currency:
+                # When using base currency, there's only one total
+                total = sum(totals.values())
+                print(f"\nTotal projected cost: {total:.2f} {config.base_currency}")
+            else:
+                # When using multiple currencies, show total for each
+                print("\nTotal projected costs by currency:")
+                for currency, total in sorted(totals.items()):
+                    print(f"{currency}: {total:.2f}")
