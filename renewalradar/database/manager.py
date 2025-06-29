@@ -22,6 +22,12 @@ class DatabaseManager:
         self.conn = None
         self.cursor = None
 
+    def get_connection(self):
+        if self.conn is None:
+            self.conn = sqlite3.connect(self.db_path)
+            self.conn.row_factory = sqlite3.Row  # Enable row access by column name
+        return self.conn
+
     def connect(self):
         """Connect to the SQLite database."""
         if self.conn is None:
@@ -309,3 +315,203 @@ class DatabaseManager:
                     payment_counts[method] = 1
 
         return payment_counts
+
+    def set_budget(self, year, month, currency, amount):
+        """Set a budget for a specific month, year, and currency."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Validate amount (must be positive)
+            if amount <= 0:
+                raise ValueError("Budget amount must be positive")
+
+            # Check if budget already exists
+            cursor.execute(
+                "SELECT id FROM budgets WHERE year = ? AND month = ? AND currency = ?",
+                (year, month, currency)
+            )
+            existing = cursor.fetchone()
+
+            if existing:
+                # Update existing budget
+                cursor.execute(
+                    """UPDATE budgets 
+                       SET amount = ?, updated_at = CURRENT_TIMESTAMP 
+                       WHERE year = ? AND month = ? AND currency = ?""",
+                    (amount, year, month, currency)
+                )
+                return False  # Not a new budget
+            else:
+                # Insert new budget
+                cursor.execute(
+                    """INSERT INTO budgets (year, month, currency, amount)
+                       VALUES (?, ?, ?, ?)""",
+                    (year, month, currency, amount)
+                )
+                return True  # New budget
+
+    def get_budgets(self, year=None, month=None, currency=None):
+        """Get all budgets, optionally filtered by year, month, or currency."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            query = "SELECT year, month, currency, amount FROM budgets"
+            params = []
+            conditions = []
+
+            if year is not None:
+                conditions.append("year = ?")
+                params.append(year)
+
+            if month is not None:
+                conditions.append("month = ?")
+                params.append(month)
+
+            if currency is not None:
+                conditions.append("currency = ?")
+                params.append(currency)
+
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+
+            query += " ORDER BY year DESC, month DESC, currency ASC"
+
+            cursor.execute(query, params)
+            return cursor.fetchall()
+
+    def get_subscription_costs_by_budget_period(self, year, month, currency=None, tag=None, payment_method=None):
+        """
+        Get total subscription costs for a specific budget period.
+
+        Calculates the sum of subscription costs that are active in the given month/year,
+        excluding cancelled subscriptions and considering renewal/start dates.
+
+        Args:
+            year: Year for the budget period
+            month: Month for the budget period (1-12)
+            currency: Currency code to filter by (or None for all currencies)
+            tag: Filter by subscription tag
+            payment_method: Filter by payment method
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Create date range for the given month
+            import calendar
+            import datetime
+
+            # Get the first and last day of the month
+            first_day = datetime.date(year, month, 1)
+            last_day = datetime.date(year, month, calendar.monthrange(year, month)[1])
+
+            # Format dates for SQLite (YYYY-MM-DD)
+            first_day_str = first_day.strftime('%Y-%m-%d')
+            last_day_str = last_day.strftime('%Y-%m-%d')
+
+            # Build the query to find active subscriptions in the month
+            query = """
+                       SELECT 
+                           s.currency, s.cost, s.name
+                       FROM 
+                           subscriptions s
+                       WHERE 
+                           s.currency = IFNULL(?, s.currency)
+                           AND (s.status IS NULL OR s.status != 'cancelled')
+                           AND (
+                               /* Case 1: Subscription starts before or during this month */
+                               (s.start_date IS NULL OR s.start_date <= ?)
+                               AND
+                               /* Case 2: Either has no renewal date, or renews after or during this month */
+                               (
+                                   s.renewal_date IS NULL 
+                                   OR 
+                                   (
+                                       /* Subscription that renews during this month is active */
+                                       (s.renewal_date >= ? AND s.renewal_date <= ?)
+                                       OR
+                                       /* Subscription that renewed before this month but has next renewal after month */
+                                       (
+                                           s.start_date <= ? 
+                                           AND 
+                                           (
+                                               /* Handle different billing cycles to calculate next renewal */
+                                               (s.billing_cycle = 'monthly' AND DATE(s.renewal_date, '+1 month') >= ?)
+                                               OR (s.billing_cycle = 'quarterly' AND DATE(s.renewal_date, '+3 month') >= ?)
+                                               OR (s.billing_cycle = 'annually' AND DATE(s.renewal_date, '+12 month') >= ?)
+                                               OR (s.billing_cycle = 'semi-annually' AND DATE(s.renewal_date, '+6 month') >= ?)
+                                               OR (s.billing_cycle IS NULL)
+                                           )
+                                       )
+                                   )
+                               )
+                           )
+                       """
+
+            # Add tag filter if provided
+            if tag is not None:
+                query += " AND s.tags LIKE ? "
+
+            # Add payment method filter if provided
+            if payment_method is not None:
+                query += " AND s.payment_method = ? "
+
+            # Build the parameters list
+            params = [
+                currency,
+                last_day_str,  # For start_date check
+                first_day_str, last_day_str,  # For renewal during month
+                last_day_str,  # For start before month end
+                first_day_str,  # Monthly
+                first_day_str,  # Quarterly
+                first_day_str,  # Annually
+                first_day_str  # Semi-annually
+            ]
+
+            # Add tag parameter if provided
+            if tag is not None:
+                params.append(f"%{tag}%")  # Using LIKE for partial tag matching
+
+            # Add payment method parameter if provided
+            if payment_method is not None:
+                params.append(payment_method)
+
+
+            cursor.execute(query, tuple(params))
+            subscriptions = cursor.fetchall()
+
+            # Calculate monthly costs per currency
+            costs_by_currency = {}
+            counts_by_currency = {}
+
+            # Debug information
+            subscription_details = {}
+
+            for sub in subscriptions:
+                # Parse all the fields we're returning
+                sub_currency = sub[0]
+                cost = sub[1]
+                name = sub[2] if len(sub) > 2 else "Unknown"
+
+                # For now, we assume monthly billing as requested
+                # No prorating based on billing cycle yet
+                monthly_cost = cost
+
+                # Add to the total for this currency
+                if sub_currency not in costs_by_currency:
+                    costs_by_currency[sub_currency] = 0
+                    counts_by_currency[sub_currency] = 0
+                    subscription_details[sub_currency] = []
+
+                costs_by_currency[sub_currency] += monthly_cost
+                counts_by_currency[sub_currency] += 1
+
+                # Keep track of which subscriptions are included for debugging
+                if len(sub) > 2:  # If we have the name
+                    subscription_details[sub_currency].append(name)
+
+            # Add the counts and details to the result dictionary
+            for currency, count in counts_by_currency.items():
+                costs_by_currency[f"{currency}_count"] = count
+                costs_by_currency[f"{currency}_details"] = subscription_details.get(currency, [])
+
+            return costs_by_currency
