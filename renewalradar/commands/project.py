@@ -12,6 +12,22 @@ from renewalradar.models.subscription import Subscription
 from renewalradar.registry import register_command
 from renewalradar.utils import date_utils
 
+# Exchange rates dictionary (fixed rates for conversion)
+# All rates are relative to USD (USD = 1.0)
+EXCHANGE_RATES = {
+    'USD': 1.0,
+    'EUR': 1.1,
+    'GBP': 1.31,
+    'CAD': 0.74,
+    'AUD': 0.67,
+    'JPY': 0.0067,
+    'INR': 0.012,
+    'CHF': 1.15,
+    'CNY': 0.14,
+    'HKD': 0.13,
+    'SGD': 0.75,
+    'MXN': 0.058
+}
 
 @register_command
 class ProjectCommand(Command):
@@ -37,6 +53,12 @@ class ProjectCommand(Command):
             "--payment-method",
             type=str,
             help="Filter projections by payment method"
+        )
+        parser.add_argument(
+            "--base-currency",
+            type=str,
+            choices=list(EXCHANGE_RATES.keys()),
+            help="Convert all amounts to specified base currency"
         )
 
     def execute(self, args: argparse.Namespace) -> None:
@@ -79,10 +101,10 @@ class ProjectCommand(Command):
             return
 
         # Project renewals for each subscription
-        projection = self._project_renewals(subscriptions, today, end_date)
+        projection = self._project_renewals(subscriptions, today, end_date, args.base_currency)
 
         # Display the projection in a table format
-        self._display_projection(projection, today, end_date)
+        self._display_projection(projection, today, end_date, args.base_currency)
 
     def _print_filter_info(self, args: argparse.Namespace) -> None:
         """Print information about active filters."""
@@ -94,18 +116,49 @@ class ProjectCommand(Command):
         if args.payment_method:
             filters_applied.append(f"payment method: '{args.payment_method}'")
 
+        if args.base_currency:
+            filters_applied.append(f"converted to base currency: '{args.base_currency}'")
+
         if filters_applied:
             print(f"Applying filters: {', '.join(filters_applied)}")
+
+    def _convert_currency(self, amount: float, from_currency: str, to_currency: str) -> float:
+        """
+        Convert amount from one currency to another using the exchange rates.
+        All conversions go through USD as the intermediate currency.
+        """
+        if from_currency == to_currency:
+            return amount
+
+        # Check if currencies are supported
+        if from_currency not in EXCHANGE_RATES:
+            print(f"Warning: Unknown currency '{from_currency}'. Cannot convert accurately.")
+            return amount
+
+        if to_currency not in EXCHANGE_RATES:
+            print(f"Warning: Unknown currency '{to_currency}'. Cannot convert accurately.")
+            return amount
+
+        # Convert to USD first (divide by source currency rate)
+        usd_amount = amount / EXCHANGE_RATES[from_currency]
+
+        # Convert from USD to target currency (multiply by target currency rate)
+        converted_amount = usd_amount * EXCHANGE_RATES[to_currency]
+
+        # Round to 2 decimal places
+        return round(converted_amount, 2)
 
     def _project_renewals(
             self,
             subscriptions: List[Subscription],
             start_date: datetime.date,
-            end_date: datetime.date
+            end_date: datetime.date,
+            base_currency: Optional[str] = None
     ) -> Dict[Tuple[int, int], Dict[str, float]]:
         """
         Project renewals for the given subscriptions within the time window.
         Returns a dictionary mapping (year, month) to a dictionary of currency -> amount.
+        If base_currency is provided, converts all amounts to that currency.
         """
         # Initialize a dictionary to store the projection
         # Key: (year, month), Value: dictionary of currency -> total amount
@@ -129,7 +182,22 @@ class ProjectCommand(Command):
                 if renewal_date >= start_date:
                     # Add the cost to the appropriate month and currency
                     year_month = (renewal_date.year, renewal_date.month)
-                    projection[year_month][subscription.currency] += float(subscription.cost)
+
+                    # Get the cost
+                    cost = float(subscription.cost)
+
+                    # Convert currency if needed
+                    if base_currency:
+                        # Convert to base currency
+                        converted_cost = self._convert_currency(
+                            cost,
+                            subscription.currency,
+                            base_currency
+                        )
+                        projection[year_month][base_currency] += converted_cost
+                    else:
+                        # Use original currency
+                        projection[year_month][subscription.currency] += cost
 
                 # Calculate the next renewal date based on the billing cycle
                 renewal_date = self._calculate_next_renewal(renewal_date, subscription.billing_cycle)
@@ -215,7 +283,8 @@ class ProjectCommand(Command):
             self,
             projection: Dict[Tuple[int, int], Dict[str, float]],
             start_date: datetime.date,
-            end_date: datetime.date
+            end_date: datetime.date,
+            base_currency: Optional[str] = None
     ) -> None:
         """Display the projection in a table format."""
         if not projection:
@@ -225,11 +294,17 @@ class ProjectCommand(Command):
         # Get sorted list of all months in the projection
         months = sorted(projection.keys())
 
-        # Get all currencies used
-        currencies = set()
-        for month_data in projection.values():
-            currencies.update(month_data.keys())
-        currencies = sorted(currencies)
+        # Get currencies to display
+        currencies = []
+        if base_currency:
+            # When a base currency is specified, we only show that one
+            currencies = [base_currency]
+        else:
+            # Otherwise show all currencies used
+            currency_set = set()
+            for month_data in projection.values():
+                currency_set.update(month_data.keys())
+            currencies = sorted(currency_set)
 
         # Create the header row
         headers = ["Month"] + currencies
@@ -249,7 +324,14 @@ class ProjectCommand(Command):
             rows.append(row)
 
         # Display the table
-        print(f"\nProjection of renewal costs for the next {(end_date - start_date).days // 30} months:")
+        period_months = (end_date - start_date).days // 30
+
+        # Customize message based on whether we're using base currency
+        if base_currency:
+            print(f"\nProjection of renewal costs for the next {period_months} months (in {base_currency}):")
+        else:
+            print(f"\nProjection of renewal costs for the next {period_months} months:")
+
         print(tabulate(rows, headers=headers, tablefmt="simple_grid"))
 
         # Calculate and display totals by currency
@@ -258,6 +340,10 @@ class ProjectCommand(Command):
             for currency, amount in month_data.items():
                 totals[currency] += amount
 
-        print("\nTotal projected costs by currency:")
-        for currency, total in sorted(totals.items()):
-            print(f"{currency}: {total:.2f}")
+        # Show totals
+        if base_currency:
+            print(f"\nTotal projected cost: {totals[base_currency]:.2f} {base_currency}")
+        else:
+            print("\nTotal projected costs by currency:")
+            for currency, total in sorted(totals.items()):
+                print(f"{currency}: {total:.2f}")
