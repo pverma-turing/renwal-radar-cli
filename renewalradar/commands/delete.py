@@ -3,7 +3,7 @@ Delete command for removing subscriptions by name.
 """
 
 import argparse
-from datetime import datetime
+import datetime
 from typing import Dict, Any, List, Optional
 
 from renewalradar.commands.base import Command
@@ -33,15 +33,24 @@ class DeleteCommand(Command):
             type=int,
             help="ID of the subscription to delete",
         )
+
+        # Create a mutually exclusive group for --dry-run and --force
+        mode_group = parser.add_mutually_exclusive_group()
+        mode_group.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Preview the subscription that would be deleted without making changes",
+        )
+        mode_group.add_argument(
+            "--force",
+            action="store_true",
+            help="Delete the subscription without confirmation or warnings",
+        )
+
         parser.add_argument(
             "--confirm",
             action="store_true",
             help="Confirm deletion of the subscription",
-        )
-        parser.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="Preview the subscription that would be deleted without making changes",
         )
 
     def _check_budget_contribution(self, subscription: Dict[str, Any]) -> bool:
@@ -55,7 +64,7 @@ class DeleteCommand(Command):
             True if the subscription contributes to current month's budget, False otherwise.
         """
         # Get the current month and year
-        current_date = datetime.now()
+        current_date = datetime.datetime.now()
         current_month = current_date.month
         current_year = current_date.year
 
@@ -122,6 +131,11 @@ class DeleteCommand(Command):
             print(f"```\nYou must provide either --name or --id to delete a subscription.\n```")
             return 1
 
+        # Validate that --dry-run and --force are not used together
+        if args.dry_run and args.force:
+            print(f"```\nCannot use --dry-run and --force together.\n```")
+            return 1
+
         # Get subscription by name or ID
         if args.name is not None:
             subscriptions = db_manager.get_subscriptions(name=args.name)
@@ -146,18 +160,15 @@ class DeleteCommand(Command):
 
             # Check if subscription contributes to current month's budget
             if self._check_budget_contribution(subscription):
-                current_month = datetime.now().strftime("%B %Y")
+                current_month = datetime.datetime.now().strftime("%B %Y")
                 print(f"```\nNote: This subscription contributes to your budget utilization for {current_month}.\n```")
 
             return 0
 
-        # Check if deletion is confirmed for actual deletion
-        if not args.confirm:
+        # Check if deletion is confirmed for actual deletion (skip if --force is used)
+        if not args.confirm and not args.force:
             print(f"```\nDeletion not confirmed. Use --confirm to permanently delete the subscription.\n```")
             return 1
-
-        # Check if subscription contributes to current month's budget
-        contributes_to_budget = self._check_budget_contribution(subscription)
 
         # Delete the subscription
         try:
@@ -167,12 +178,17 @@ class DeleteCommand(Command):
                 success = db_manager.delete_subscription_by_id(args.id)
 
             if success:
-                # Show success message with subscription details
+                # For force mode, just show a simple message
+                if args.force:
+                    print(f"```\nSubscription '{subscription['name']}' has been permanently deleted.\n```")
+                    return 0
+
+                # Otherwise, show normal success message with details
                 self._display_subscription_summary(subscription)
 
-                # Display budget warning if applicable
-                if contributes_to_budget:
-                    current_month = datetime.now().strftime("%B %Y")
+                # Display budget warning if applicable (only in non-force mode)
+                if self._check_budget_contribution(subscription):
+                    current_month = datetime.datetime.now().strftime("%B %Y")
                     print(
                         f"```\nWarning: This subscription contributed to your budget utilization for {current_month}.\nYou may want to review your budget breakdown.\n```")
 
