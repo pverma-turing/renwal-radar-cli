@@ -239,22 +239,26 @@ class BudgetCommand(Command):
             # Provide a helpful message based on which filters were used
             if year is not None and month is not None:
                 print(
-                    f"No budgets found for {calendar.month_name[month]} {year}{' with currency ' + currency if currency else ''}.")
+                    f"```\nNo budgets found for {calendar.month_name[month]} {year}{' with currency ' + currency if currency else ''}.\n```")
             elif month is not None:
                 print(
-                    f"No budgets found for {calendar.month_name[month]}{' with currency ' + currency if currency else ''}.")
+                    f"```\nNo budgets found for {calendar.month_name[month]}{' with currency ' + currency if currency else ''}.\n```")
             elif year is not None:
-                print(f"No budgets found for year {year}{' with currency ' + currency if currency else ''}.")
+                print(
+                    f"```\nNo budgets found for year {year}{' with currency ' + currency if currency else ''}.\n```")
             elif currency is not None:
-                print(f"No budgets found for currency {currency}.")
+                print(f"```\nNo budgets found for currency {currency}.\n```")
             else:
-                print("No budgets found.")
+                print("```\nNo budgets found.\n```")
 
-            print("\nTo create a budget, use:")
+            print("To create a budget, use:")
             print("  budget --set AMOUNT --currency CURRENCY [--month MONTH] [--year YEAR]")
             return
 
         table_data = []
+
+        # Track if any subscriptions match the filters
+        has_any_matching_subscriptions = False
 
         for budget in budgets:
             budget_year, budget_month, budget_currency, budget_amount = budget
@@ -265,11 +269,16 @@ class BudgetCommand(Command):
                 tag=tag, payment_method=payment_method
             )
 
-            # Get utilized amount (or 0 if no subscriptions in this currency)
+            # Get utilized amount and subscription count
             utilized = costs.get(budget_currency, 0)
-
-            # Get subscription count for this currency
             subscription_count = costs.get(f"{budget_currency}_count", 0)
+
+            # Track if no matching subscriptions were found
+            has_matching_subscriptions = subscription_count > 0
+
+            # Update global flag if this budget has matching subscriptions
+            if has_matching_subscriptions:
+                has_any_matching_subscriptions = True
 
             # Calculate remaining budget and percentage used
             remaining = budget_amount - utilized
@@ -456,6 +465,10 @@ class BudgetCommand(Command):
 
         # Add a note about what's included in calculations
         print("\nNote:")
+
+        # Add warning about no matching subscriptions if needed
+        if not has_any_matching_subscriptions:
+            print(f"- {Fore.YELLOW}No matching subscriptions found for selected filters{Style.RESET_ALL}")
 
         # Explain what's included in 'Utilized' based on filters
         if utilization_filters:
