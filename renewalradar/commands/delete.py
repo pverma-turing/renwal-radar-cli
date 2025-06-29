@@ -3,11 +3,13 @@ Delete command for removing subscriptions by name.
 """
 
 import argparse
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 from renewalradar.commands.base import Command
 from renewalradar.database.manager import DatabaseManager
 from renewalradar.registry import register_command
+from renewalradar.utils.date_utils import parse_date
 
 
 @register_command
@@ -36,6 +38,41 @@ class DeleteCommand(Command):
             action="store_true",
             help="Confirm deletion of the subscription",
         )
+
+    def _check_budget_contribution(self, subscription: Dict[str, Any]) -> bool:
+        """
+        Check if the subscription contributes to current or recent month's budget.
+
+        Args:
+            subscription: The subscription data
+
+        Returns:
+            True if the subscription contributes to current month's budget, False otherwise.
+        """
+        # Get the current month and year
+        current_date = datetime.now()
+        current_month = current_date.month
+        current_year = current_date.year
+
+        # Check if the subscription has renewal date in the current month
+        if 'renewal_date' in subscription and subscription['renewal_date']:
+            try:
+                renewal_date = parse_date(subscription['renewal_date'])
+                if renewal_date.month == current_month and renewal_date.year == current_year:
+                    return True
+            except ValueError:
+                pass  # Invalid date format, continue checking
+
+        # Check if the subscription has start date in the current month
+        if 'start_date' in subscription and subscription['start_date']:
+            try:
+                start_date = parse_date(subscription['start_date'])
+                if start_date.month == current_month and start_date.year == current_year:
+                    return True
+            except ValueError:
+                pass  # Invalid date format, continue checking
+
+        return False
 
     def execute(self, args: argparse.Namespace) -> int:
         """Execute the delete command with the given arguments."""
@@ -72,6 +109,9 @@ class DeleteCommand(Command):
             print(f"```\nDeletion not confirmed. Use --confirm to permanently delete the subscription.\n```")
             return 1
 
+        # Check if subscription contributes to current month's budget
+        contributes_to_budget = self._check_budget_contribution(subscription)
+
         # Delete the subscription
         try:
             if args.name is not None:
@@ -99,6 +139,12 @@ class DeleteCommand(Command):
                 if 'payment_method' in subscription:
                     print(f"Payment Method: {subscription['payment_method']}")
                 print("```")
+
+                # Display budget warning if applicable
+                if contributes_to_budget:
+                    current_month = datetime.now().strftime("%B %Y")
+                    print(
+                        f"```\nWarning: This subscription contributed to your budget utilization for {current_month}.\nYou may want to review your budget breakdown.\n```")
 
                 return 0
             else:
