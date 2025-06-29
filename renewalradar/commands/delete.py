@@ -27,8 +27,19 @@ class DeleteCommand(Command):
             help="Name of the subscription to delete",
         )
 
+        parser.add_argument(
+            "--confirm",
+            action="store_true",
+            help="Confirm deletion (required to actually delete the subscription)",
+        )
+
     def execute(self, args: argparse.Namespace) -> int:
         """Execute the delete command with the given arguments."""
+        # Check if the confirmation flag is provided
+        if not args.confirm:
+            print("```\nDeletion not confirmed. Use --confirm to permanently delete the subscription.\n```")
+            return 1
+
         db_manager = DatabaseManager()
 
         # Check if subscription exists
