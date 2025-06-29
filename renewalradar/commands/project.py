@@ -32,6 +32,17 @@ EXCHANGE_RATES = {
 # Valid group-by options
 VALID_GROUP_BY = ['tag', 'payment-method']
 
+# Billing cycle to months mapping for normalization
+BILLING_CYCLE_MONTHS = {
+    'weekly': 1/4.33,  # Average weeks per month (52/12)
+    'monthly': 1,
+    'quarterly': 3,
+    'biannual': 6,
+    'semi-annual': 6,
+    'yearly': 12,
+    'annual': 12
+}
+
 @register_command
 class ProjectCommand(Command):
     """Command for projecting future subscription renewal costs."""
@@ -68,6 +79,11 @@ class ProjectCommand(Command):
             type=str,
             choices=VALID_GROUP_BY,
             help="Group projections by 'tag' or 'payment-method'"
+        )
+        parser.add_argument(
+            "--normalize",
+            action="store_true",
+            help="Normalize costs by prorating longer billing cycles to monthly amounts"
         )
 
     def execute(self, args: argparse.Namespace) -> None:
@@ -159,6 +175,9 @@ class ProjectCommand(Command):
         if args.group_by:
             filters_applied.append(f"grouped by: '{args.group_by}'")
 
+        if args.normalize:
+            filters_applied.append("costs normalized to monthly amounts")
+
         if filters_applied:
             print(f"Applying filters: {', '.join(filters_applied)}")
 
@@ -203,17 +222,38 @@ class ProjectCommand(Command):
             print(f"Warning: Unknown group by '{group_by}'. Using 'Uncategorized'.")
             return 'Uncategorized'
 
+    def _get_billing_cycle_months(self, billing_cycle: str) -> float:
+        """Get the number of months in a billing cycle."""
+        billing_cycle = billing_cycle.lower()
+        if billing_cycle in BILLING_CYCLE_MONTHS:
+            return BILLING_CYCLE_MONTHS[billing_cycle]
+        else:
+            # Default to monthly if unknown
+            print(f"Warning: Unknown billing cycle '{billing_cycle}'. Assuming monthly.")
+            return 1
+
+    def _normalize_cost(self, cost: float, billing_cycle: str) -> float:
+        """Normalize a cost to a monthly amount based on the billing cycle."""
+        months = self._get_billing_cycle_months(billing_cycle)
+        if months == 0:
+            return cost  # Avoid division by zero
+
+        # Calculate monthly cost and round to 2 decimal places
+        return round(cost / months, 2)
+
     def _project_renewals(
             self,
             subscriptions: List[Subscription],
             start_date: datetime.date,
             end_date: datetime.date,
-            base_currency: Optional[str] = None
+            base_currency: Optional[str] = None,
+            normalize: bool = False
     ) -> Dict[Tuple[int, int], Dict[str, float]]:
         """
         Project renewals for the given subscriptions within the time window.
         Returns a dictionary mapping (year, month) to a dictionary of currency -> amount.
         If base_currency is provided, converts all amounts to that currency.
+        If normalize is True, prorates costs for longer billing cycles to monthly amounts.
         """
         # Initialize a dictionary to store the projection
         # Key: (year, month), Value: dictionary of currency -> total amount
@@ -226,36 +266,71 @@ class ProjectCommand(Command):
 
             # Start with the current renewal date
             renewal_date = datetime.datetime.strptime(subscription.renewal_date, '%Y-%m-%d').date()
+
+            # Get the subscription cost
+            cost = float(subscription.cost)
+
             # For trial subscriptions, calculate when they'll convert to paid
             if hasattr(subscription, 'status') and subscription.status == 'trial':
                 # Use the renewal date as the conversion date for trials
                 pass  # The default logic works for trials too
 
-            # Project all renewals until the end date
-            while renewal_date <= end_date:
-                # Skip if the renewal date is before the start date
-                if renewal_date >= start_date:
-                    # Add the cost to the appropriate month and currency
-                    year_month = (renewal_date.year, renewal_date.month)
+            if normalize:
+                # Normalize the cost to a monthly amount
+                monthly_cost = self._normalize_cost(cost, subscription.billing_cycle)
 
-                    # Get the cost
-                    cost = float(subscription.cost)
+                # Calculate months to include in the projection
+                current_date = max(start_date, renewal_date)
+
+                # Add normalized cost for each month in the projection period
+                while current_date <= end_date:
+                    year_month = (current_date.year, current_date.month)
 
                     # Convert currency if needed
                     if base_currency:
-                        # Convert to base currency
                         converted_cost = self._convert_currency(
-                            cost,
+                            monthly_cost,
                             subscription.currency,
                             base_currency
                         )
                         projection[year_month][base_currency] += converted_cost
                     else:
-                        # Use original currency
-                        projection[year_month][subscription.currency] += cost
+                        projection[year_month][subscription.currency] += monthly_cost
 
-                # Calculate the next renewal date based on the billing cycle
-                renewal_date = self._calculate_next_renewal(renewal_date, subscription.billing_cycle)
+                    # Move to the next month
+                    month = current_date.month + 1
+                    year = current_date.year
+                    if month > 12:
+                        month = 1
+                        year += 1
+
+                    # Last day might exceed the days in the month, so we handle that
+                    max_day = calendar.monthrange(year, month)[1]
+                    day = min(current_date.day, max_day)
+                    current_date = datetime.date(year, month, day)
+            else:
+                # Use the original non-normalized projection logic
+                while renewal_date <= end_date:
+                    # Skip if the renewal date is before the start date
+                    if renewal_date >= start_date:
+                        # Add the cost to the appropriate month and currency
+                        year_month = (renewal_date.year, renewal_date.month)
+
+                        # Convert currency if needed
+                        if base_currency:
+                            # Convert to base currency
+                            converted_cost = self._convert_currency(
+                                cost,
+                                subscription.currency,
+                                base_currency
+                            )
+                            projection[year_month][base_currency] += converted_cost
+                        else:
+                            # Use original currency
+                            projection[year_month][subscription.currency] += cost
+
+                    # Calculate the next renewal date based on the billing cycle
+                    renewal_date = self._calculate_next_renewal(renewal_date, subscription.billing_cycle)
 
         return projection
 
@@ -265,13 +340,15 @@ class ProjectCommand(Command):
             start_date: datetime.date,
             end_date: datetime.date,
             base_currency: Optional[str] = None,
-            group_by: str = 'tag'
+            group_by: str = 'tag',
+            normalize: bool = False
     ) -> Dict[Tuple[int, int], Dict[str, float]]:
         """
         Project renewals for the given subscriptions within the time window,
         grouped by the specified attribute (tag or payment-method).
         Returns a dictionary mapping (year, month) to a dictionary of group -> amount.
         If base_currency is provided, converts all amounts to that currency before grouping.
+        If normalize is True, prorates costs for longer billing cycles to monthly amounts.
         """
         # Initialize a dictionary to store the projection
         # Key: (year, month), Value: dictionary of group -> total amount
@@ -285,6 +362,9 @@ class ProjectCommand(Command):
             # Get the group value for this subscription
             group_value = self._get_group_value(subscription, group_by)
 
+            # Get the subscription cost
+            cost = float(subscription.cost)
+
             # Start with the current renewal date
             renewal_date = datetime.datetime.strptime(subscription.renewal_date, '%Y-%m-%d').date()
 
@@ -293,34 +373,67 @@ class ProjectCommand(Command):
                 # Use the renewal date as the conversion date for trials
                 pass  # The default logic works for trials too
 
-            # Project all renewals until the end date
-            while renewal_date <= end_date:
-                # Skip if the renewal date is before the start date
-                if renewal_date >= start_date:
-                    # Add the cost to the appropriate month and group
-                    year_month = (renewal_date.year, renewal_date.month)
+            if normalize:
+                # Normalize the cost to a monthly amount
+                monthly_cost = self._normalize_cost(cost, subscription.billing_cycle)
 
-                    # Get the cost
-                    cost = float(subscription.cost)
+                # Calculate months to include in the projection
+                current_date = max(start_date, renewal_date)
+
+                # Add normalized cost for each month in the projection period
+                while current_date <= end_date:
+                    year_month = (current_date.year, current_date.month)
 
                     # Convert currency if needed
                     if base_currency:
-                        # Convert to base currency
                         converted_cost = self._convert_currency(
-                            cost,
+                            monthly_cost,
                             subscription.currency,
                             base_currency
                         )
                     else:
-                        # Use original currency (note: this can lead to mixed currency
-                        # totals within a group, which might be confusing)
-                        converted_cost = cost
+                        converted_cost = monthly_cost
 
                     # Add to the group total for this month
                     projection[year_month][group_value] += converted_cost
 
-                # Calculate the next renewal date based on the billing cycle
-                renewal_date = self._calculate_next_renewal(renewal_date, subscription.billing_cycle)
+                    # Move to the next month
+                    month = current_date.month + 1
+                    year = current_date.year
+                    if month > 12:
+                        month = 1
+                        year += 1
+
+                    # Last day might exceed the days in the month, so we handle that
+                    max_day = calendar.monthrange(year, month)[1]
+                    day = min(current_date.day, max_day)
+                    current_date = datetime.date(year, month, day)
+            else:
+                # Use the original non-normalized projection logic
+                while renewal_date <= end_date:
+                    # Skip if the renewal date is before the start date
+                    if renewal_date >= start_date:
+                        # Add the cost to the appropriate month and group
+                        year_month = (renewal_date.year, renewal_date.month)
+
+                        # Convert currency if needed
+                        if base_currency:
+                            # Convert to base currency
+                            converted_cost = self._convert_currency(
+                                cost,
+                                subscription.currency,
+                                base_currency
+                            )
+                        else:
+                            # Use original currency (note: this can lead to mixed currency
+                            # totals within a group, which might be confusing)
+                            converted_cost = cost
+
+                        # Add to the group total for this month
+                        projection[year_month][group_value] += converted_cost
+
+                    # Calculate the next renewal date based on the billing cycle
+                    renewal_date = self._calculate_next_renewal(renewal_date, subscription.billing_cycle)
 
         return projection
 
@@ -345,7 +458,7 @@ class ProjectCommand(Command):
 
             return datetime.date(year, month, day)
 
-        elif billing_cycle.lower() == 'yearly':
+        elif billing_cycle.lower() == 'yearly' or billing_cycle.lower() == 'annual':
             # Add 1 year
             try:
                 return datetime.date(
@@ -404,7 +517,8 @@ class ProjectCommand(Command):
             projection: Dict[Tuple[int, int], Dict[str, float]],
             start_date: datetime.date,
             end_date: datetime.date,
-            base_currency: Optional[str] = None
+            base_currency: Optional[str] = None,
+            normalize: bool = False
     ) -> None:
         """Display the projection in a table format (currency-based columns)."""
         if not projection:
@@ -446,12 +560,20 @@ class ProjectCommand(Command):
         # Display the table
         period_months = (end_date - start_date).days // 30
 
-        # Customize message based on whether we're using base currency
-        if base_currency:
-            print(f"\nProjection of renewal costs for the next {period_months} months (in {base_currency}):")
-        else:
-            print(f"\nProjection of renewal costs for the next {period_months} months:")
+        # Customize message based on whether we're using base currency and normalization
+        header_text = f"\nProjection of renewal costs for the next {period_months} months"
 
+        if normalize:
+            header_text += " (normalized to monthly amounts"
+        else:
+            header_text += " (actual renewal amounts"
+
+        if base_currency:
+            header_text += f", in {base_currency}"
+
+        header_text += "):"
+
+        print(header_text)
         print(tabulate(rows, headers=headers, tablefmt="simple_grid"))
 
         # Calculate and display totals by currency
@@ -474,7 +596,8 @@ class ProjectCommand(Command):
             start_date: datetime.date,
             end_date: datetime.date,
             base_currency: Optional[str] = None,
-            group_by: str = 'tag'
+            group_by: str = 'tag',
+            normalize: bool = False
     ) -> None:
         """Display the projection in a table format (group-based columns)."""
         if not projection:
@@ -514,8 +637,14 @@ class ProjectCommand(Command):
         group_type = "tag" if group_by == "tag" else "payment method"
         header_text = f"\nProjection of renewal costs for the next {period_months} months"
 
+        # Add normalization info
+        if normalize:
+            header_text += " (normalized to monthly amounts"
+        else:
+            header_text += " (actual renewal amounts"
+
         # Add grouping and currency info
-        header_text += f" (grouped by {group_type}"
+        header_text += f", grouped by {group_type}"
         if base_currency:
             header_text += f", in {base_currency}"
         header_text += "):"
