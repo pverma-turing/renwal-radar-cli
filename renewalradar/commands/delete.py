@@ -64,6 +64,9 @@ class DeleteCommand(Command):
             print(f"```\nNo subscription found with {id_type}: {identifier}\n```")
             return 1
 
+        # Store subscription details before deletion for summary
+        subscription = subscriptions[0]
+
         # Check if deletion is confirmed
         if not args.confirm:
             print(f"```\nDeletion not confirmed. Use --confirm to permanently delete the subscription.\n```")
@@ -77,7 +80,26 @@ class DeleteCommand(Command):
                 success = db_manager.delete_subscription_by_id(args.id)
 
             if success:
-                print(f"```\nSubscription with {id_type} '{identifier}' has been deleted.\n```")
+                # Show success message with subscription details
+                print("```")
+                print(f"Subscription deleted:")
+                print(f"Name: {subscription['name']}")
+                print(f"Cost: {subscription['cost']} {subscription['currency']}")
+                print(f"Billing Cycle: {subscription['billing_cycle']}")
+
+                # Include tags if available
+                if 'tags' in subscription and subscription['tags']:
+                    print(f"Tags: {subscription['tags']}")
+
+                # Include any other relevant fields
+                if 'start_date' in subscription:
+                    print(f"Start Date: {subscription['start_date']}")
+                if 'renewal_date' in subscription:
+                    print(f"Renewal Date: {subscription['renewal_date']}")
+                if 'payment_method' in subscription:
+                    print(f"Payment Method: {subscription['payment_method']}")
+                print("```")
+
                 return 0
             else:
                 print(f"```\nFailed to delete subscription with {id_type}: {identifier}\n```")
