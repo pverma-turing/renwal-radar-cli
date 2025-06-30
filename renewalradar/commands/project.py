@@ -1,6 +1,8 @@
 import argparse
+import csv
 import datetime
 import calendar
+import sys
 from collections import defaultdict
 from typing import Dict, List, Tuple, Any, Optional, NamedTuple
 
@@ -52,6 +54,8 @@ class ProjectionConfig(NamedTuple):
     base_currency: Optional[str] = None
     group_by: Optional[str] = None
     normalize: bool = False
+    dry_run: bool = False
+    output_format: str = 'table'
 
 
 class RenewalEvent(NamedTuple):
@@ -108,6 +112,12 @@ class ProjectCommand(Command):
             action="store_true",
             help="Preview what would be included in the projection without calculating costs"
         )
+        parser.add_argument(
+            "--format",
+            type=str,
+            default="table",
+            help="Output format: 'table' or 'csv' (default: table)"
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Handle the project command."""
@@ -128,7 +138,9 @@ class ProjectCommand(Command):
             end_date=end_date,
             base_currency=args.base_currency,
             group_by=args.group_by,
-            normalize=args.normalize
+            normalize=args.normalize,
+            dry_run=args.dry_run,
+            output_format=args.format.lower()
         )
 
         # Get filtered subscriptions
@@ -157,8 +169,11 @@ class ProjectCommand(Command):
             self._show_empty_projection_message(subscriptions, config)
             return
 
-        # Display the projection
-        self._display_projection(projection, config)
+        # Display the projection in the requested format
+        if config.output_format == 'csv':
+            self._output_csv_projection(projection, config)
+        else:
+            self._display_projection(projection, config)
 
     def _validate_arguments(self, args: argparse.Namespace) -> Optional[str]:
         """Validate command arguments and return error message if invalid."""
@@ -176,8 +191,34 @@ class ProjectCommand(Command):
             valid_options = ", ".join(f"'{option}'" for option in VALID_GROUP_BY)
             return f"Invalid group-by option: '{args.group_by}'. Valid options are: {valid_options}"
 
+        # Validate format
+        if args.format and args.format.lower() not in VALID_FORMATS:
+            valid_formats = ", ".join(f"'{fmt}'" for fmt in VALID_FORMATS)
+            return f"Unsupported output format: '{args.format}'. Supported formats are: {valid_formats}"
+
+            # All validations passed
+            return None
+
         # All validations passed
         return None
+
+    def _show_empty_projection_message(self, subscriptions: List[Subscription], config: ProjectionConfig) -> None:
+        """Show a helpful message when the projection calculation resulted in empty data."""
+        if config.output_format == 'csv':
+            print("Month,No Data")
+            print("Error,Projection calculation completed but no costs were found")
+            return
+
+        print("\nProjection calculation completed, but no costs were found to display.")
+        print("This could happen if all subscriptions are filtered out during processing.")
+
+        # Give more specific guidance
+        if config.normalize:
+            print("\nPossible issue: Normalization with unusual billing cycles")
+            print("Try running without --normalize to see if that affects the results")
+
+        print("\nTip: Use the `view` command to check your subscription details")
+        print("     Example: renewalradar view --upcoming")
 
     def _show_no_subscriptions_message(self, args: argparse.Namespace) -> None:
         """Show a helpful message when no subscriptions match the filters."""
@@ -195,6 +236,11 @@ class ProjectCommand(Command):
 
     def _show_no_projections_message(self, subscriptions: List[Subscription], config: ProjectionConfig) -> None:
         """Show a helpful message when subscriptions exist but no projections can be made."""
+        if config.output_format == 'csv':
+            print("Month,No Data")
+            print("Error,No renewal projections could be generated for the selected time period")
+            return
+
         print("\nNo renewal projections could be generated for the selected time period.")
         print(f"Selected period: {config.start_date.strftime('%b %d, %Y')} to {config.end_date.strftime('%b %d, %Y')}")
 
@@ -260,6 +306,23 @@ class ProjectCommand(Command):
     def _display_dry_run_info(self, subscriptions: List[Subscription], config: ProjectionConfig,
                               args: argparse.Namespace) -> None:
         """Display information about what would be included in the projection."""
+        # For CSV format, output a simple header and info
+        if config.output_format == 'csv':
+            print("Field,Value")
+            print(f"SubscriptionsTotal,{len(subscriptions)}")
+            active_count = sum(1 for s in subscriptions if getattr(s, 'status', '') == 'active')
+            trial_count = sum(1 for s in subscriptions if getattr(s, 'status', '') == 'trial')
+            print(f"SubscriptionsActive,{active_count}")
+            print(f"SubscriptionsTrial,{trial_count}")
+            print(f"ProjectionMonths,{args.months}")
+            print(f"Tag,{args.tag or 'None'}")
+            print(f"PaymentMethod,{args.payment_method or 'None'}")
+            print(f"BaseCurrency,{args.base_currency or 'None'}")
+            print(f"GroupBy,{args.group_by or 'None'}")
+            print(f"Normalize,{args.normalize}")
+            print("Message,This is a dry run - no projection calculations were performed")
+            return
+
         print("\n===== PROJECTION DRY RUN =====")
 
         # Count active and trial subscriptions
@@ -306,6 +369,9 @@ class ProjectCommand(Command):
             print(f"  - Currency conversion: Converting all amounts to {args.base_currency}")
         else:
             print("  - Currency conversion: None (keeping original currencies)")
+
+        if args.format:
+            print(f"  - Output format: {args.format}")
 
         # Display trial handling info
         print("\nTrial subscription handling:")
@@ -795,3 +861,56 @@ class ProjectCommand(Command):
                 print("\nTotal projected costs by currency:")
                 for currency, total in sorted(totals.items()):
                     print(f"{currency}: {total:.2f}")
+
+    def _output_csv_projection(
+            self,
+            projection: Dict[Tuple[int, int], Dict[str, float]],
+            config: ProjectionConfig
+    ) -> None:
+        """Output the projection in CSV format to stdout."""
+        if not projection:
+            print("Month,No Data")
+            return
+
+        # Get sorted list of all months in the projection
+        months = sorted(projection.keys())
+
+        # Get all column headers (either currencies or groups)
+        columns = set()
+        for month_data in projection.values():
+            columns.update(month_data.keys())
+        columns = sorted(columns)
+
+        # Create CSV writer for stdout
+        writer = csv.writer(sys.stdout)
+
+        # Write header row
+        writer.writerow(["Month"] + columns)
+
+        # Write data rows
+        for year, month in months:
+            # Format the month name
+            month_name = f"{calendar.month_name[month]} {year}"
+
+            # Create a row with the month name and the amount for each column
+            row = [month_name]
+            for column in columns:
+                amount = projection[(year, month)].get(column, 0)
+                row.append(f"{amount:.2f}")
+
+            writer.writerow(row)
+
+        # Write summary rows
+        writer.writerow([])  # Empty row as separator
+
+        # Calculate totals
+        totals = defaultdict(float)
+        for month_data in projection.values():
+            for key, amount in month_data.items():
+                totals[key] += amount
+
+        # Write total row
+        total_row = ["Total"]
+        for column in columns:
+            total_row.append(f"{totals.get(column, 0):.2f}")
+        writer.writerow(total_row)
