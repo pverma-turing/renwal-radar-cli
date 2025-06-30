@@ -105,6 +105,11 @@ class ProjectCommand(Command):
             action="store_true",
             help="Normalize costs by prorating longer billing cycles to monthly amounts"
         )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Preview what would be included in the projection without calculating costs"
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Handle the project command."""
@@ -186,8 +191,78 @@ class ProjectCommand(Command):
         if args.normalize:
             filters_applied.append("costs normalized to monthly amounts")
 
+        if args.dry_run:
+            filters_applied.append("dry run (preview only)")
+
         if filters_applied:
             print(f"Applying filters: {', '.join(filters_applied)}")
+
+    def _display_dry_run_info(self, subscriptions: List[Subscription], config: ProjectionConfig,
+                              args: argparse.Namespace) -> None:
+        """Display information about what would be included in the projection."""
+        print("\n===== PROJECTION DRY RUN =====")
+
+        # Count active and trial subscriptions
+        active_count = sum(1 for s in subscriptions if getattr(s, 'status', '') == 'active')
+        trial_count = sum(1 for s in subscriptions if getattr(s, 'status', '') == 'trial')
+
+        # Display subscription counts
+        print(f"Subscriptions selected: {len(subscriptions)} total")
+        print(f"  - {active_count} active subscription(s)")
+        print(f"  - {trial_count} trial subscription(s)")
+
+        # Display date range
+        months = (config.end_date - config.start_date).days // 30
+        print(f"\nProjection period: {months} months")
+        print(f"  - From: {config.start_date.strftime('%B %d, %Y')}")
+        print(f"  - To:   {config.end_date.strftime('%B %d, %Y')}")
+
+        # Display active filters
+        print("\nActive filters:")
+        if args.tag:
+            print(f"  - Tag filter: '{args.tag}'")
+        else:
+            print("  - Tag filter: None (including all tags)")
+
+        if args.payment_method:
+            print(f"  - Payment method filter: '{args.payment_method}'")
+        else:
+            print("  - Payment method filter: None (including all payment methods)")
+
+        # Display projection options
+        print("\nProjection options:")
+        if args.normalize:
+            print("  - Cost normalization: Enabled (prorating longer billing cycles to monthly amounts)")
+        else:
+            print("  - Cost normalization: Disabled (showing actual renewal amounts)")
+
+        if args.group_by:
+            group_type = "tag" if args.group_by == "tag" else "payment method"
+            print(f"  - Grouping: By {group_type}")
+        else:
+            print("  - Grouping: None (grouping by currency)")
+
+        if args.base_currency:
+            print(f"  - Currency conversion: Converting all amounts to {args.base_currency}")
+        else:
+            print("  - Currency conversion: None (keeping original currencies)")
+
+        # Display trial handling info
+        print("\nTrial subscription handling:")
+        print("  - Trials will convert to paid when they end")
+        print("  - Trial costs will only be included after conversion to paid")
+
+        # Display billing cycles info
+        billing_cycles = set(s.billing_cycle.lower() for s in subscriptions if hasattr(s, 'billing_cycle'))
+        if billing_cycles:
+            print("\nBilling cycles in selected subscriptions:")
+            for cycle in sorted(billing_cycles):
+                print(f"  - {cycle}")
+
+        # Message about dry run
+        print("\nNOTE: This is a dry run - no projection calculations were performed.")
+        print("Run command without --dry-run to see actual cost projections.")
+        print("=" * 30)
 
     def _convert_currency(self, amount: float, from_currency: str, to_currency: str) -> float:
         """
@@ -485,7 +560,7 @@ class ProjectCommand(Command):
                 if is_trial:
                     current_date = max(config.start_date, first_renewal_date)
                 else:
-                    current_date = max(config.start_date, subscription.renewal_date)
+                    current_date = max(config.start_date, parse_date(subscription.renewal_date))
 
                 # Create monthly events until the end date
                 while current_date <= config.end_date:
