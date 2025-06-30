@@ -14,6 +14,7 @@ from ..database.manager import DatabaseManager
 from ..utils.date_utils import parse_date, validate_date_format
 
 from renewalradar.registry import register_command
+from ..utils.status_utils import print_status_help, VALID_STATUSES, get_status_error_message
 
 
 @register_command
@@ -34,33 +35,33 @@ class AddCommand(Command):
         """Register command-specific arguments."""
         parser.add_argument(
             '--name',
-            required=True,
+            required=False,
             help='Name of the subscription'
         )
 
         parser.add_argument(
             '--cost',
-            required=True,
+            required=False,
             type=str,  # Changed to str to handle custom validation
             help='Cost of the subscription (must be a positive number)'
         )
 
         parser.add_argument(
             '--billing-cycle',
-            required=True,
+            required=False,
             choices=cls.VALID_BILLING_CYCLES,
             help=f'Billing cycle ({" or ".join(cls.VALID_BILLING_CYCLES)})'
         )
 
         parser.add_argument(
             '--currency',
-            required=True,
+            required=False,
             help=f'Currency code ({", ".join(cls.SUPPORTED_CURRENCIES)})'
         )
 
         parser.add_argument(
             '--start-date',
-            required=True,
+            required=False,
             help='Start date (YYYY-MM-DD)'
         )
 
@@ -91,6 +92,19 @@ class AddCommand(Command):
             '--linked-to',
             default=None,
             help='Name of the parent subscription to link this subscription to'
+        )
+
+        parser.add_argument(
+            "--status",
+            choices=Subscription.VALID_STATUSES,
+            default="active",
+            help="Current status of subscription (default: active)"
+        )
+
+        parser.add_argument(
+            "--help-status",
+            action="store_true",
+            help="Show information about valid subscription statuses"
         )
 
     def _validate_cost(self, cost_str):
@@ -248,6 +262,10 @@ class AddCommand(Command):
             int: Exit code (0 for success, 1 for errors)
         """
         try:
+            # Check if help-status flag is set
+            if args.help_status:
+                print_status_help()
+                return 0
             # Validate all input fields
             cost = self._validate_cost(args.cost)
             currency = self._validate_currency(args.currency)
@@ -255,6 +273,11 @@ class AddCommand(Command):
                 args.start_date, args.renewal_date, args.trial_end_date
             )
             notes = self._validate_notes(args.notes)
+
+            # Validate status
+            if args.status not in VALID_STATUSES:
+                print(get_status_error_message(args.status))
+                return 1
 
             # Validate name is not empty
             if not args.name.strip():
@@ -283,6 +306,7 @@ class AddCommand(Command):
                     'currency': currency,
                     'start_date': start_date,
                     'payment_method': args.payment_method.strip() if args.payment_method else '',
+                    'status': args.status,
                     'notes': notes,
                     'trial_end_date': trial_end_date,
                     'parent_subscription_id': parent_subscription_id
