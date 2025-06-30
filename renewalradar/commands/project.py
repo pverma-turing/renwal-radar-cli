@@ -91,13 +91,11 @@ class ProjectCommand(Command):
         parser.add_argument(
             "--base-currency",
             type=str,
-            choices=list(EXCHANGE_RATES.keys()),
             help="Convert all amounts to specified base currency"
         )
         parser.add_argument(
             "--group-by",
             type=str,
-            choices=VALID_GROUP_BY,
             help="Group projections by 'tag' or 'payment-method'"
         )
         parser.add_argument(
@@ -146,11 +144,73 @@ class ProjectCommand(Command):
         # Generate renewal events for each subscription
         events = self._generate_renewal_events(subscriptions, config)
 
+        # Check if any events were generated
+        if not events:
+            self._show_no_projections_message(subscriptions, config)
+            return
+
         # Process events into a projection
         projection = self._process_events_to_projection(events, config)
 
+        # Check if the projection has any data
+        if not projection:
+            self._show_empty_projection_message(subscriptions, config)
+            return
+
         # Display the projection
         self._display_projection(projection, config)
+
+    def _validate_arguments(self, args: argparse.Namespace) -> Optional[str]:
+        """Validate command arguments and return error message if invalid."""
+        # Validate months
+        if args.months is not None and args.months <= 0:
+            return "The number of months must be greater than zero."
+
+        # Validate base currency
+        if args.base_currency and args.base_currency not in EXCHANGE_RATES:
+            supported_currencies = ", ".join(sorted(EXCHANGE_RATES.keys()))
+            return f"Unsupported currency: '{args.base_currency}'. Supported currencies: {supported_currencies}"
+
+        # Validate group-by
+        if args.group_by and args.group_by not in VALID_GROUP_BY:
+            valid_options = ", ".join(f"'{option}'" for option in VALID_GROUP_BY)
+            return f"Invalid group-by option: '{args.group_by}'. Valid options are: {valid_options}"
+
+        # All validations passed
+        return None
+
+    def _show_no_subscriptions_message(self, args: argparse.Namespace) -> None:
+        """Show a helpful message when no subscriptions match the filters."""
+        print("\nNo subscriptions matched the current filters. Nothing to project.")
+
+        # Provide more specific guidance based on the applied filters
+        if args.tag:
+            print(f"No subscriptions found with tag: '{args.tag}'")
+
+        if args.payment_method:
+            print(f"No subscriptions found with payment method: '{args.payment_method}'")
+
+        print("\nTip: Use the `view` command to inspect your subscription data.")
+        print("     Example: renewalradar view --all")
+
+    def _show_no_projections_message(self, subscriptions: List[Subscription], config: ProjectionConfig) -> None:
+        """Show a helpful message when subscriptions exist but no projections can be made."""
+        print("\nNo renewal projections could be generated for the selected time period.")
+        print(f"Selected period: {config.start_date.strftime('%b %d, %Y')} to {config.end_date.strftime('%b %d, %Y')}")
+
+        # Count active and trial subscriptions
+        active_count = sum(1 for s in subscriptions if getattr(s, 'status', '') == 'active')
+        trial_count = sum(1 for s in subscriptions if getattr(s, 'status', '') == 'trial')
+
+        print(f"\nSelected subscriptions: {len(subscriptions)} total ({active_count} active, {trial_count} trial)")
+
+        # Suggest possible solutions
+        print("\nPossible reasons:")
+        print("- All selected subscriptions renew outside the projection period")
+        print("- Trial subscriptions don't convert to paid within the projection period")
+
+        print("\nTip: Try extending the projection period with --months or check renewal dates")
+        print("     Example: renewalradar project --months 12")
 
     def _get_filtered_subscriptions(self, args: argparse.Namespace) -> List[Subscription]:
         """Get subscriptions with applied filters."""
@@ -274,12 +334,16 @@ class ProjectCommand(Command):
 
         # Check if currencies are supported
         if from_currency not in EXCHANGE_RATES:
-            print(f"Warning: Unknown currency '{from_currency}'. Cannot convert accurately.")
-            return amount
+            print(f"Warning: Unknown currency '{from_currency}'. Using 1:1 conversion.")
+            from_rate = 1.0
+        else:
+            from_rate = EXCHANGE_RATES[from_currency]
 
         if to_currency not in EXCHANGE_RATES:
-            print(f"Warning: Unknown currency '{to_currency}'. Cannot convert accurately.")
-            return amount
+            print(f"Warning: Unknown currency '{to_currency}'. Using 1:1 conversion.")
+            to_rate = 1.0
+        else:
+            to_rate = EXCHANGE_RATES[to_currency]
 
         # Convert to USD first (divide by source currency rate)
         usd_amount = amount / EXCHANGE_RATES[from_currency]
