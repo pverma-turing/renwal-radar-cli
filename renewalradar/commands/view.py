@@ -109,7 +109,16 @@ class ViewCommand(Command):
 
         parser.add_argument(
             "--payment-method",
-            help="Filter subscriptions by payment method"
+            action="append",
+            dest="payment_methods",
+            help="Filter subscriptions by payment method. Can be used multiple times for multiple payment methods (OR logic between payment methods)."
+        )
+
+        parser.add_argument(
+            "--tag",
+            action="append",
+            dest="tags",
+            help="Filter subscriptions by tag. Can be used multiple times for multiple tags (OR logic between tags)."
         )
 
         parser.add_argument(
@@ -151,23 +160,25 @@ class ViewCommand(Command):
             # Initialize database if it doesn't exist
             db_manager = DatabaseManager()
 
-            # Build filters dictionary based on provided arguments
+            # Build filters based on provided arguments
+            # Different filter types (status, tags, payment_method) will be combined with AND logic
+            # Within each filter type (multiple tags or multiple payment methods), OR logic is used
             filters = {}
-
-            if args.currency:
-                filters["currency"] = args.currency
 
             if args.status:
                 filters["status"] = args.status
 
-            if args.payment_method:
-                filters["payment_method"] = args.payment_method
+            if args.payment_methods:
+                filters["payment_methods"] = args.payment_methods
 
-            # Get subscriptions with filters and sort
-            subscriptions = db_manager.get_filtered_subscriptions(
-                filters=filters,
-                sort_by=args.sort
-            )
+            if args.tags:
+                filters["tag"] = args.tags
+
+            if args.currency:
+                filters["currency"] = args.currency
+
+            # Get subscriptions
+            subscriptions = db_manager.get_filtered_subscriptions(filters, args.sort)
 
             # Apply limit if specified
             if args.limit and args.limit > 0 and len(subscriptions) > args.limit:
@@ -177,15 +188,12 @@ class ViewCommand(Command):
                 print("No subscriptions found.")
                 return 0
 
-            # Process subscriptions to classify expiring ones and track trial warnings
+            # Process subscriptions to classify expiring ones
             current_date = dt.now().date()
             expiring_threshold = current_date + datetime.timedelta(days=args.expiring_days)
 
             # Track how many subscriptions were classified as expiring
             expiring_count = 0
-
-            # Track trial subscriptions with renewal dates in the expiring window
-            trial_warning_count = 0
 
             # Initialize counters for status summary
             status_counts = {status: 0 for status in Subscription.VALID_STATUSES}
@@ -194,14 +202,7 @@ class ViewCommand(Command):
             # Track upcoming renewals
             upcoming_renewals = 0
 
-            # Track spending by currency
-            total_by_currency = defaultdict(float)
-            annual_by_currency = defaultdict(float)
-
-            # Track spending by status and currency
-            spend_by_status_currency = defaultdict(lambda: defaultdict(float))
-
-            # Process each subscription to check for expiring status and trial warnings
+            # Process each subscription to check for expiring status
             for subscription in subscriptions:
                 # Add a display_status attribute for showing in the view
                 # This doesn't change the actual status stored in the database
@@ -217,27 +218,14 @@ class ViewCommand(Command):
                     # Count this as an upcoming renewal
                     upcoming_renewals += 1
 
-                # Check for trial warning (separate from expiring logic)
-                if (subscription.status == "trial" and
-                        subscription.renewal_date and
-                        self._is_date_within_range(subscription.renewal_date, current_date, expiring_threshold)):
-                    # Add a flag for trial warning
-                    subscription.trial_warning = True
-                    trial_warning_count += 1
-                else:
-                    subscription.trial_warning = False
-
                 # Count by display status for summary
                 if subscription.display_status in status_counts:
                     status_counts[subscription.display_status] += 1
 
-                # Track total spending by currency
-                currency = subscription.currency
-                total_by_currency[currency] += subscription.cost
-                annual_by_currency[currency] += subscription.calculate_annual_cost()
-
-                # Track spending by status and currency
-                spend_by_status_currency[subscription.display_status][currency] += subscription.cost
+            # Group by status if requested
+            if args.by_status:
+                self._display_by_status(subscriptions, current_date)
+                return 0
 
             # Prepare table data
             table_data = []
@@ -254,76 +242,60 @@ class ViewCommand(Command):
                         # In case of invalid date format
                         pass
 
-                # Add trial warning indicator if requested and applicable
-                if args.trial_warning and sub.trial_warning:
-                    try:
-                        renewal_date = dt.strptime(sub.renewal_date, "%Y-%m-%d").date()
-                        days_until_renewal = (renewal_date - current_date).days
-                        status_display += f" {Fore.YELLOW}⚠️ TRIAL ENDING SOON ({days_until_renewal} days){Style.RESET_ALL}"
-                    except (ValueError, TypeError):
-                        # In case of invalid date format
-                        status_display += f" {Fore.YELLOW}⚠️ TRIAL ENDING SOON{Style.RESET_ALL}"
-
                 table_data.append([
                     sub.name,
-                    f"{self._get_currency_symbol(sub.currency)}{sub.cost:.2f}",
+                    f"{sub.currency} {sub.cost:.2f}",
                     sub.billing_cycle,
                     sub.start_date or "N/A",
                     sub.renewal_date or "N/A",
                     sub.payment_method or "N/A",
-                    status_display
+                    status_display,
+                    ", ".join(sub.tags) if sub.tags else "N/A"
                 ])
 
             # Define headers
-            headers = ["Name", "Cost", "Billing Cycle", "Start Date", "Renewal Date", "Payment Method", "Status"]
+            headers = ["Name", "Cost", "Billing Cycle", "Start Date", "Renewal Date", "Payment Method", "Status",
+                       "Tags"]
 
             # Display table
             print(tabulate(table_data, headers=headers, tablefmt="grid"))
 
-            # Display standard summary (monthly and annual cost)
-            if subscriptions:
-                # If we have a filter by currency, show only that currency
-                if args.currency:
-                    print(
-                        f"\nTotal Monthly Cost: {self._get_currency_symbol(args.currency)}{total_by_currency.get(args.currency, 0):.2f}")
-                    print(
-                        f"Total Annual Cost: {self._get_currency_symbol(args.currency)}{annual_by_currency.get(args.currency, 0):.2f}")
-                # Otherwise show for the first subscription's currency (common case)
-                elif subscriptions:
-                    main_currency = subscriptions[0].currency
-                    print(
-                        f"\nTotal Monthly Cost: {self._get_currency_symbol(main_currency)}{total_by_currency[main_currency]:.2f}")
-                    print(
-                        f"Total Annual Cost: {self._get_currency_symbol(main_currency)}{annual_by_currency[main_currency]:.2f}")
+            # Display summary
+            total_cost = sum(sub.cost for sub in subscriptions)
+            annual_cost = sum(sub.annual_cost for sub in subscriptions)
+
+            print(f"\nTotal Monthly Cost: {subscriptions[0].currency} {total_cost:.2f}")
+            print(f"Total Annual Cost: {subscriptions[0].currency} {annual_cost:.2f}")
+
+            # Show total spend summary if requested
+            if args.total_spend:
+                self._display_total_spend(subscriptions, args.total_spend)
 
             # Show dependency tree if requested
             if args.show_dependency_tree:
                 self._display_dependency_tree(subscriptions)
 
-            # Display status summary after the main output
+            # Display status summary
             self._display_status_summary(status_counts, upcoming_renewals, args.expiring_days)
-
-            # Display trial warning summary if requested and applicable
-            if args.trial_warning and trial_warning_count > 0:
-                print(
-                    f"{Fore.YELLOW}Trial Ending Soon: {trial_warning_count} subscription(s) in next {args.expiring_days} days{Style.RESET_ALL}")
-
-            # Display total spend if requested
-            if args.total_spend:
-                self._display_total_spend(total_by_currency, args.currency)
-
-                # If by-status breakdown is requested, show that as well
-                if args.by_status:
-                    self._display_spend_by_status(spend_by_status_currency, args.currency)
 
             # Display filter information if filters were applied
             filter_info = []
-            if args.currency:
-                filter_info.append(f"currency='{args.currency}'")
-            if args.status:
-                filter_info.append(f"status=[{', '.join(args.status)}]")
-            if args.payment_method:
-                filter_info.append(f"payment_method='{args.payment_method}'")
+
+            # Group related filters together for clarity
+            tag_filter = f"tags=[{', '.join(args.tags)}]" if args.tags else None
+            payment_filter = f"payment_methods=[{', '.join(args.payment_methods)}]" if args.payment_methods else None
+            status_filter = f"status=[{', '.join(args.status)}]" if args.status else None
+            currency_filter = f"currency='{args.currency}'" if args.currency else None
+
+            # Combine all filters with clear indication of AND relationship
+            if tag_filter:
+                filter_info.append(tag_filter)
+            if payment_filter:
+                filter_info.append(payment_filter)
+            if status_filter:
+                filter_info.append(status_filter)
+            if currency_filter:
+                filter_info.append(currency_filter)
 
             # Add expiring days information if subscriptions were classified as expiring
             if expiring_count > 0:
@@ -332,7 +304,7 @@ class ViewCommand(Command):
                       f"(renewal within {args.expiring_days} days)")
 
             if filter_info:
-                print(f"\nFilters applied: {', '.join(filter_info)}")
+                print(f"\nFilters applied: {' AND '.join(filter_info)}")
 
             return 0
 
@@ -357,28 +329,98 @@ class ViewCommand(Command):
             print(f"\nSummary: {status_summary}")
             print(f"Upcoming Renewals: {upcoming_renewals} in next {expiring_days} days")
 
-    def _display_total_spend(self, total_by_currency, target_currency=None):
-        """Display total spending across subscriptions, optionally converted to a target currency."""
-        print("\nTotal Spend:")
+    def _display_by_status(self, subscriptions, current_date):
+        """Display subscriptions grouped by status."""
+        # Group subscriptions by display_status
+        status_groups = {}
+        for sub in subscriptions:
+            status = sub.display_status
+            if status not in status_groups:
+                status_groups[status] = []
+            status_groups[status].append(sub)
 
-        if target_currency and target_currency in self.EXCHANGE_RATES:
-            # If a target currency is specified, convert all amounts to that currency
-            total_in_target = 0
-            for currency, amount in total_by_currency.items():
-                # Convert from original currency to target currency
-                if currency in self.EXCHANGE_RATES:
-                    # First convert to USD, then to target currency
-                    amount_in_usd = amount * self.EXCHANGE_RATES[currency]
-                    amount_in_target = amount_in_usd / self.EXCHANGE_RATES[target_currency]
-                    total_in_target += amount_in_target
+        # Display each group
+        for status in ["active", "trial", "expiring", "canceled"]:
+            if status in status_groups and status_groups[status]:
+                print(f"\n{status.upper()} SUBSCRIPTIONS:")
 
-            print(f"  {self._get_currency_symbol(target_currency)}{total_in_target:.2f} ({target_currency})")
+                # Prepare table data for this status
+                table_data = []
+                for sub in status_groups[status]:
+                    # Special display for expiring status
+                    status_display = status
+                    if status == "expiring" and sub.renewal_date:
+                        try:
+                            renewal_date = dt.strptime(sub.renewal_date, "%Y-%m-%d").date()
+                            days_until_renewal = (renewal_date - current_date).days
+                            status_display = f"expiring ({days_until_renewal} days)"
+                        except (ValueError, TypeError):
+                            pass
 
-        else:
-            # Show totals grouped by currency
-            for currency, amount in sorted(total_by_currency.items()):
-                symbol = self._get_currency_symbol(currency)
-                print(f"  {symbol}{amount:.2f} ({currency})")
+                    table_data.append([
+                        sub.name,
+                        f"{sub.currency} {sub.cost:.2f}",
+                        sub.billing_cycle,
+                        sub.renewal_date or "N/A",
+                        sub.payment_method or "N/A",
+                        ", ".join(sub.tags) if sub.tags else "N/A"
+                    ])
+
+                headers = ["Name", "Cost", "Billing Cycle", "Renewal Date", "Payment Method", "Tags"]
+                print(tabulate(table_data, headers=headers, tablefmt="grid"))
+
+                # Display cost summary for this group
+                group_cost = sum(sub.cost for sub in status_groups[status])
+                print(f"Total {status.capitalize()} Monthly Cost: {subscriptions[0].currency} {group_cost:.2f}")
+
+    def _display_total_spend(self, subscriptions, period):
+        """Display total spend breakdown by various dimensions."""
+        print(f"\nTotal Spend Analysis ({period.capitalize()}):")
+
+        # Determine the multiplier for the period
+        if period == "monthly":
+            title = "Monthly"
+            # Monthly cost is already the base
+            get_cost = lambda sub: sub.cost
+        else:  # annual
+            title = "Annual"
+            get_cost = lambda sub: sub.annual_cost
+
+        # Analyze by payment method
+        payment_methods = {}
+        for sub in subscriptions:
+            method = sub.payment_method or "Unknown"
+            if method not in payment_methods:
+                payment_methods[method] = 0
+            payment_methods[method] += get_cost(sub)
+
+        # Display by payment method
+        if payment_methods:
+            print(f"\n{title} Spend by Payment Method:")
+            method_data = [[method, f"{subscriptions[0].currency} {cost:.2f}"]
+                           for method, cost in sorted(payment_methods.items(), key=lambda x: x[1], reverse=True)]
+            print(tabulate(method_data, headers=["Payment Method", "Cost"], tablefmt="simple"))
+
+        # Analyze by tag (note: subscriptions can have multiple tags)
+        tag_costs = {}
+        for sub in subscriptions:
+            if not sub.tags:
+                tag = "Untagged"
+                if tag not in tag_costs:
+                    tag_costs[tag] = 0
+                tag_costs[tag] += get_cost(sub)
+            else:
+                for tag in sub.tags:
+                    if tag not in tag_costs:
+                        tag_costs[tag] = 0
+                    tag_costs[tag] += get_cost(sub)
+
+        # Display by tag
+        if tag_costs:
+            print(f"\n{title} Spend by Tag:")
+            tag_data = [[tag, f"{subscriptions[0].currency} {cost:.2f}"]
+                        for tag, cost in sorted(tag_costs.items(), key=lambda x: x[1], reverse=True)]
+            print(tabulate(tag_data, headers=["Tag", "Cost"], tablefmt="simple"))
 
     def _display_spend_by_status(self, spend_by_status_currency, target_currency=None):
         """Display spending breakdown by subscription status."""

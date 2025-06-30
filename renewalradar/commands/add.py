@@ -15,6 +15,7 @@ from ..utils.date_utils import parse_date, validate_date_format
 
 from renewalradar.registry import register_command
 from ..utils.status_utils import print_status_help, VALID_STATUSES, get_status_error_message
+from ..utils.validators import ValidationRegistry
 
 
 @register_command
@@ -105,6 +106,13 @@ class AddCommand(Command):
             "--help-status",
             action="store_true",
             help="Show information about valid subscription statuses"
+        )
+
+        parser.add_argument(
+            "--tag",
+            action="append",
+            dest="tags",
+            help="Assign a tag to the subscription. Can be used multiple times for multiple tags."
         )
 
     def _validate_cost(self, cost_str):
@@ -283,6 +291,21 @@ class AddCommand(Command):
             if not args.name.strip():
                 raise ValueError("Name cannot be empty")
 
+            # Validate payment method
+            if args.payment_method:
+                try:
+                    ValidationRegistry.validate_payment_method(args.payment_method)
+                except ValueError as e:
+                    raise ValueError(str(e))
+
+            # Validate tags
+            if args.tags:
+                try:
+                    for tag in args.tags:
+                        ValidationRegistry.validate_tag(tag)
+                except ValueError as e:
+                    raise ValueError(str(e))
+
             # Create database manager
             db_manager = DatabaseManager()
             try:
@@ -309,7 +332,8 @@ class AddCommand(Command):
                     'status': args.status,
                     'notes': notes,
                     'trial_end_date': trial_end_date,
-                    'parent_subscription_id': parent_subscription_id
+                    'parent_subscription_id': parent_subscription_id,
+                    'tags': args.tags
                 }
 
                 # Add renewal_date if provided

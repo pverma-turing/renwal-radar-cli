@@ -7,6 +7,7 @@ import datetime
 from ..utils.date_utils import (
     parse_date, validate_date_format, calculate_next_renewal, days_until_renewal
 )
+from ..utils.validators import ValidationRegistry
 
 
 class Subscription:
@@ -19,7 +20,7 @@ class Subscription:
 
     def __init__(self, name, cost, billing_cycle, currency, start_date,
                  renewal_date=None, payment_method='', notes=None, status='active',
-                 trial_end_date=None, parent_subscription_id=None):
+                 trial_end_date=None, parent_subscription_id=None, tags=None, id=None):
         """
         Initialize a new subscription.
 
@@ -61,11 +62,55 @@ class Subscription:
         current_time = datetime.datetime.now().isoformat()
         self.created_at = current_time
         self.updated_at = current_time
+        self.tags = tags if tags else []
         self.id = None
 
     def __str__(self):
         """String representation of subscription."""
-        return f"{self.name} ({self.currency} {self.cost} {self.billing_cycle}, status: {self.status})"
+        tags_str = f", tags: [{', '.join(self.tags)}]" if self.tags else ""
+        payment_str = f", payment: {self.payment_method}" if self.payment_method else ""
+        return f"{self.name} ({self.currency} {self.cost} {self.billing_cycle}, status: {self.status}{payment_str}{tags_str})"
+
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, value):
+        if not value:
+            raise ValueError("Subscription name cannot be empty")
+        self._name = value
+
+    @property
+    def cost(self):
+        return self._cost
+
+    @cost.setter
+    def cost(self, value):
+        try:
+            self._cost = float(value)
+            if self._cost <= 0:
+                raise ValueError("Cost must be a positive number")
+        except ValueError:
+            raise ValueError("Cost must be a valid number")
+
+    @property
+    def billing_cycle(self):
+        return self._billing_cycle
+
+    @billing_cycle.setter
+    def billing_cycle(self, value):
+        if value not in self.VALID_BILLING_CYCLES:
+            raise ValueError(f"Billing cycle must be one of: {', '.join(self.VALID_BILLING_CYCLES)}")
+        self._billing_cycle = value
+
+    @property
+    def currency(self):
+        return self._currency
+
+    @currency.setter
+    def currency(self, value):
+        self._currency = value
 
     @property
     def status(self):
@@ -76,6 +121,56 @@ class Subscription:
         if value not in self.VALID_STATUSES:
             raise ValueError(f"Status must be one of: {', '.join(self.VALID_STATUSES)}")
         self._status = value
+
+    @property
+    def payment_method(self):
+        return self._payment_method
+
+    @payment_method.setter
+    def payment_method(self, value):
+        # Validate payment method if provided
+        if value:
+            ValidationRegistry.validate_payment_method(value)
+            self._payment_method = value
+        else:
+            self._payment_method = None
+
+    @property
+    def tags(self):
+        return self._tags
+
+    @tags.setter
+    def tags(self, value):
+        if isinstance(value, str):
+            # If tags is stored as a comma-separated string, convert to list
+            tags_list = [tag.strip() for tag in value.split(',')] if value else []
+            # Validate each tag
+            for tag in tags_list:
+                ValidationRegistry.validate_tag(tag)
+            self._tags = tags_list
+        else:
+            # Otherwise, assume it's already a list or None
+            tags_list = value if value else []
+            # Validate each tag
+            for tag in tags_list:
+                ValidationRegistry.validate_tag(tag)
+            self._tags = tags_list
+
+    @property
+    def tags_string(self):
+        """Return tags as a comma-separated string for storage."""
+        return ','.join(self.tags) if self.tags else ""
+
+    @property
+    def annual_cost(self):
+        """Calculate annual cost based on billing cycle and cost."""
+        multipliers = {
+            "monthly": 12,
+            "quarterly": 4,
+            "biannual": 2,
+            "annual": 1
+        }
+        return self.cost * multipliers.get(self.billing_cycle, 0)
 
     def set_cost(self, cost):
         """
@@ -201,7 +296,8 @@ class Subscription:
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'trial_end_date': self.trial_end_date,
-            'parent_subscription_id': self.parent_subscription_id
+            'parent_subscription_id': self.parent_subscription_id,
+            'tags': self.tags_string
         }
 
     @classmethod
@@ -227,7 +323,8 @@ class Subscription:
             notes=data.get('notes'),
             status=data.get('status', 'active'),
             trial_end_date=data.get('trial_end_date'),
-            parent_subscription_id=data.get('parent_subscription_id')
+            parent_subscription_id=data.get('parent_subscription_id'),
+            tags=data.get("tags", ""),
         )
         if 'id' in data:
             subscription.id = data['id']
