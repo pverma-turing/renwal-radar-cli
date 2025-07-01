@@ -52,6 +52,11 @@ class RemindCommand(Command):
             dest="payment_methods",
             help="Filter by payment method (can be used multiple times, combined with OR logic)"
         )
+        parser.add_argument(
+            "--notify-preview",
+            action="store_true",
+            help="Preview what subscriptions would trigger notifications if alerts were enabled"
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Handle the remind command."""
@@ -87,12 +92,13 @@ class RemindCommand(Command):
             subscriptions, today, filter_description
         )
 
-        # Display the renewals
+        # Display the renewals, including notification preview if requested
         self._display_renewals(
             upcoming_renewals,
             totals_by_currency,
             args.days,
-            filter_description
+            filter_description,
+            notify_preview=args.notify_preview
         )
 
     def _display_renewals(
@@ -100,9 +106,19 @@ class RemindCommand(Command):
             upcoming_renewals: List[Dict[str, Any]],
             totals_by_currency: Dict[str, float],
             days_window: int,
-            filter_description: Optional[str] = None
+            filter_description: Optional[str] = None,
+            notify_preview: bool = False
     ) -> None:
-        """Display the upcoming subscription renewals in a table format."""
+        """
+        Display the upcoming subscription renewals in a table format.
+
+        If notify_preview is True, adds a message about which subscriptions
+        would trigger notifications if alerts were enabled.
+        """
+        # Show message for notification preview if requested
+        if notify_preview:
+            print("\nThe following subscriptions would trigger a notification if alerts were enabled:")
+
         if not upcoming_renewals:
             filter_msg = f" matching {filter_description}" if filter_description else ""
             print(f"No upcoming renewals{filter_msg} in the next {days_window} days.")
