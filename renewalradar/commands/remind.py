@@ -181,6 +181,7 @@ class RemindCommand(Command):
 
             # Format status with colors (minimized string operations)
             status = renewal['status']
+            # Since status is already normalized to lowercase in _process_subscriptions
             status_text = trial_text if status == 'trial' else status.capitalize()
 
             # Format payment amount with currency (single string operation)
@@ -297,8 +298,10 @@ class RemindCommand(Command):
         Note: Trial subscriptions require special handling in _process_subscriptions,
         but we still filter at the database level using renewal_date_range.
         """
+        # We'll handle detailed status filtering in the process_subscriptions method
+        # to ensure case-insensitive and null status handling is consistent
         filters = {
-            "status": ["active", "trial"],  # Always filter by active/trial status
+            "status_not_canceled": True,  # Add a flag to exclude canceled at DB level if possible
             "renewal_date_range": (today, end_date)  # Filter by renewal date range
         }
 
@@ -371,9 +374,6 @@ class RemindCommand(Command):
 
         # Process each subscription (should be pre-filtered by DB query)
         for subscription in subscriptions:
-            # First check if it's a trial subscription - special handling required
-            status = subscription.status
-
             # Optimization: Access all required attributes once to minimize lookups
             name = subscription.name
             payment_method = subscription.payment_method
@@ -383,15 +383,32 @@ class RemindCommand(Command):
             billing_cycle = subscription.billing_cycle
             start_date = getattr(subscription, 'start_date', None)
             tags = getattr(subscription, 'tags', [])
+
             if start_date:
                 start_date = parse_date(start_date).date()
+
+            # Get status (handle missing status)
+            status = getattr(subscription, 'status', None)
 
             # Skip if there's no renewal date (safety check)
             if not renewal_date:
                 continue
 
+            # Normalize status to lowercase and handle None/missing values
+            status_normalized = status.lower() if status else ""
+
+            # Skip any subscription that:
+            # 1. Has a status that contains "cancel" (case insensitive)
+            # 2. Has a status that isn't exactly "active" or "trial" (case insensitive)
+            # 3. Has a missing or null status
+            if (
+                    "cancel" in status_normalized or
+                    status_normalized not in ["active", "trial"]
+            ):
+                continue
+
             # Special handling for trial subscriptions
-            if status == status_trial:
+            if status_normalized == "trial":
                 # Determine if the subscription is still in trial period
                 if not start_date:
                     # If no start_date, we can't determine trial status - use renewal date as fallback
@@ -416,7 +433,7 @@ class RemindCommand(Command):
             renewal_info = {
                 'name': name,
                 'days_until_renewal': days_until_renewal,
-                'status': status,
+                'status': status_normalized,  # Use normalized status to ensure consistent display
                 'payment_method': payment_method,
                 'amount': amount,
                 'currency': currency,
