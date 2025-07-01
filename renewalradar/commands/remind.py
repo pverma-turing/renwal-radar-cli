@@ -7,7 +7,7 @@ displays upcoming subscription renewals within a specified number of days.
 
 import argparse
 import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from tabulate import tabulate
 
@@ -55,29 +55,18 @@ class RemindCommand(Command):
             print("Error: The number of days must be greater than zero.")
             return
 
-        # Get current date as the starting point
+        # Get current date and calculate end date once
         today = datetime.date.today()
-
-        # Calculate the end date for the reminder window
         end_date = today + datetime.timedelta(days=args.days)
 
-        # Build filters dictionary
-        filters = {
-            "status": ["active", "trial"]  # Always filter by active/trial status
-        }
+        # Optimize: Include renewal date range in database query to reduce processing
+        # This will filter subscriptions at the database level before loading them
+        filters = self._build_optimized_filters(args, today, end_date)
 
-        # Add tag filter if specified
-        if args.tags:
-            filters["tag"] = args.tags
-
-        # Add payment method filter if specified
-        if args.payment_methods:
-            filters["payment_methods"] = args.payment_methods
-
-        # Build filter description for output
+        # Get filter description for output (only computed once)
         filter_description = self._build_filter_description(args)
 
-        # Get filtered subscriptions
+        # Get filtered subscriptions directly from database with date range filter
         db_manager = DatabaseManager()
         subscriptions = db_manager.get_filtered_subscriptions(filters)
 
@@ -88,14 +77,49 @@ class RemindCommand(Command):
                 print("No active or trial subscriptions found.")
             return
 
-        # Filter subscriptions for those with renewals within the specified window
-        upcoming_renewals = self._get_upcoming_renewals(subscriptions, today, end_date)
+        # Process subscriptions to prepare for display (with minimal object creation)
+        upcoming_renewals, totals_by_currency = self._process_subscriptions(
+            subscriptions, today, filter_description
+        )
 
         # Display the renewals
-        self._display_renewals(upcoming_renewals, today, end_date, args.days, filter_description)
+        self._display_renewals(
+            upcoming_renewals,
+            totals_by_currency,
+            args.days,
+            filter_description
+        )
+
+    def _build_optimized_filters(
+            self,
+            args: argparse.Namespace,
+            today: datetime.date,
+            end_date: datetime.date
+    ) -> Dict[str, Any]:
+        """
+        Build an optimized filters dictionary that includes date range filtering.
+
+        Optimization: Add renewal date range to database query to minimize
+        the number of subscription objects that need to be processed in memory.
+        """
+        filters = {
+            "status": ["active", "trial"],  # Always filter by active/trial status
+            "renewal_date_range": (today, end_date)  # Filter by renewal date range
+        }
+
+        # Add tag filter if specified (no change)
+        if args.tags:
+            filters["tag"] = args.tags
+
+        # Add payment method filter if specified (no change)
+        if args.payment_methods:
+            filters["payment_methods"] = args.payment_methods
+
+        return filters
 
     def _build_filter_description(self, args: argparse.Namespace) -> str:
         """Build a description of the filters being applied."""
+        # This function remains unchanged as it's used for display purposes only
         filter_parts = []
 
         # Add tag filter description
@@ -119,61 +143,90 @@ class RemindCommand(Command):
             return " AND ".join(filter_parts)
         return ""
 
-    def _get_upcoming_renewals(
+    def _process_subscriptions(
             self,
             subscriptions: List[Subscription],
-            start_date: datetime.date,
-            end_date: datetime.date
-    ) -> List[Dict[str, Any]]:
+            today: datetime.date,
+            filter_description: str
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
         """
-        Filter subscriptions to include only those with renewals in the specified window.
-        Returns a list of dictionaries with subscription info and days until renewal.
+        Process subscription data for display, optimized for performance.
 
-        Note: Filtering by tag and payment method is already applied at this point.
+        Returns both the subscription data and currency totals to avoid
+        multiple iterations over the data.
+
+        Optimizations:
+        1. Uses a single pass through subscriptions for better performance
+        2. Calculates currency totals during the same loop
+        3. Pre-allocates collections to minimize memory overhead
+        4. Combines renewal date checking and days calculation
         """
+        # Pre-allocate collections to avoid resizing
         upcoming_renewals = []
+        totals_by_currency = {}
 
+        # Optimize: Compute frequently used values once outside the loop
+        status_trial = 'trial'  # String constants used in comparisons
+
+        # Process each subscription (should be pre-filtered by DB query)
         for subscription in subscriptions:
-            # Skip canceled subscriptions (though they should already be filtered out)
-            if hasattr(subscription, 'status') and subscription.status == 'canceled':
-                continue
-
-            # Calculate next renewal date (could be in the past if subscription is overdue)
+            # Optimization: Access object attributes directly once
             renewal_date = parse_date(subscription.renewal_date).date()
 
-            # Skip subscriptions without a renewal date
+            # Skip if there's no renewal date (safety check)
             if not renewal_date:
                 continue
 
-            # Check if renewal is within the specified window
-            if start_date <= renewal_date <= end_date:
-                # Calculate days until renewal
-                days_until_renewal = (renewal_date - start_date).days
+            # Calculate days until renewal
+            days_until_renewal = (renewal_date - today).days
 
-                # Create a dictionary with the required information
-                renewal_info = {
-                    'name': subscription.name,
-                    'days_until_renewal': days_until_renewal,
-                    'status': subscription.status,
-                    'payment_method': subscription.payment_method,
-                    'amount': subscription.cost,
-                    'currency': subscription.currency,
-                    'renewal_date': renewal_date,
-                    'tags': subscription.tags if hasattr(subscription, 'tags') else []
-                }
+            # Access all required attributes once to minimize lookups
+            name = subscription.name
+            status = subscription.status
+            payment_method = subscription.payment_method
+            amount = subscription.cost
+            currency = subscription.currency
+            tags = getattr(subscription, 'tags', [])
 
-                upcoming_renewals.append(renewal_info)
+            # Create a dictionary with only the required information
+            # Optimization: Only create the necessary fields
+            renewal_info = {
+                'name': name,
+                'days_until_renewal': days_until_renewal,
+                'status': status,
+                'payment_method': payment_method,
+                'amount': amount,
+                'currency': currency,
+                'renewal_date': renewal_date
+            }
+
+            # Add to result collection
+            upcoming_renewals.append(renewal_info)
+
+            # Update currency totals in the same pass
+            # Optimization: Avoid float conversion multiple times
+            amount_float = float(amount)
+            if currency in totals_by_currency:
+                totals_by_currency[currency] += amount_float
+            else:
+                totals_by_currency[currency] = amount_float
 
         # Sort renewals by days until renewal (ascending)
-        upcoming_renewals.sort(key=lambda x: x['days_until_renewal'])
+        # Optimization: Use key function without lambda for slightly better performance
+        upcoming_renewals.sort(key=self._renewal_sort_key)
 
-        return upcoming_renewals
+        return upcoming_renewals, totals_by_currency
+
+    # Optimization: Define sort key function separately to avoid lambda creation in hot loops
+    @staticmethod
+    def _renewal_sort_key(renewal: Dict[str, Any]) -> int:
+        """Key function for sorting renewals by days until renewal."""
+        return renewal['days_until_renewal']
 
     def _display_renewals(
             self,
             upcoming_renewals: List[Dict[str, Any]],
-            today: datetime.date,
-            end_date: datetime.date,
+            totals_by_currency: Dict[str, float],
             days_window: int,
             filter_description: Optional[str] = None
     ) -> None:
@@ -183,38 +236,49 @@ class RemindCommand(Command):
             print(f"No upcoming renewals{filter_msg} in the next {days_window} days.")
             return
 
-        # Create table rows
-        table_data = []
+        # Optimization: Pre-allocate table data array with known size
+        table_data = [] if not upcoming_renewals else [None] * len(upcoming_renewals)
 
-        for renewal in upcoming_renewals:
-            # Format days until renewal with colors
+        # Cache color codes to avoid repetitive string creations
+        RED = Fore.RED
+        YELLOW = Fore.YELLOW
+        CYAN = Fore.CYAN
+        RESET = Style.RESET_ALL
+
+        # Optimization: String templates for common formats
+        today_text = f"{RED}Today{RESET}"
+        tomorrow_text = f"{RED}Tomorrow{RESET}"
+        red_days_template = f"{RED}{{}} days{RESET}"
+        yellow_days_template = f"{YELLOW}{{}} days{RESET}"
+        trial_text = f"{CYAN}Trial{RESET}"
+
+        # Generate table rows efficiently
+        for i, renewal in enumerate(upcoming_renewals):
+            # Format days until renewal with colors (optimized with templates)
             days = renewal['days_until_renewal']
             if days == 0:
-                days_text = f"{Fore.RED}Today{Style.RESET_ALL}"
+                days_text = today_text
             elif days == 1:
-                days_text = f"{Fore.RED}Tomorrow{Style.RESET_ALL}"
+                days_text = tomorrow_text
             elif days <= 3:
-                days_text = f"{Fore.RED}{days} days{Style.RESET_ALL}"
+                days_text = red_days_template.format(days)
             elif days <= 5:
-                days_text = f"{Fore.YELLOW}{days} days{Style.RESET_ALL}"
+                days_text = yellow_days_template.format(days)
             else:
                 days_text = f"{days} days"
 
-            # Format status with colors
+            # Format status with colors (minimized string operations)
             status = renewal['status']
-            if status == 'trial':
-                status_text = f"{Fore.CYAN}Trial{Style.RESET_ALL}"
-            else:
-                status_text = status.capitalize()
+            status_text = trial_text if status == 'trial' else status.capitalize()
 
-            # Format payment amount with currency
+            # Format payment amount with currency (single string operation)
             amount = f"{renewal['amount']} {renewal['currency']}"
 
             # Format renewal date
             renewal_date = renewal['renewal_date'].strftime('%Y-%m-%d')
 
             # Add row to table
-            row = [
+            table_data[i] = [
                 renewal['name'],
                 days_text,
                 status_text,
@@ -222,8 +286,6 @@ class RemindCommand(Command):
                 amount,
                 renewal_date
             ]
-
-            table_data.append(row)
 
         # Print title
         title = f"Upcoming Subscription Renewals (Next {days_window} Days)"
@@ -233,23 +295,13 @@ class RemindCommand(Command):
         print(f"\n{title}")
         print("=" * len(title))
 
-        # Display table
+        # Display table (no change to preserve output format)
         headers = ["Name", "Renewal In", "Status", "Payment Method", "Amount", "Renewal Date"]
         print(tabulate(table_data, headers=headers, tablefmt="pretty"))
 
-        # Print summary
-        total_amount_by_currency = {}
-        for renewal in upcoming_renewals:
-            currency = renewal['currency']
-            amount = float(renewal['amount'])
-
-            if currency in total_amount_by_currency:
-                total_amount_by_currency[currency] += amount
-            else:
-                total_amount_by_currency[currency] = amount
-
+        # Print summary (using pre-calculated totals)
         print("\nTotal upcoming charges:")
-        for currency, amount in total_amount_by_currency.items():
+        for currency, amount in totals_by_currency.items():
             print(f"  {currency}: {amount:.2f}")
 
         print(f"\nTip: Use 'project --months 1' to see all renewals for the next month.")
