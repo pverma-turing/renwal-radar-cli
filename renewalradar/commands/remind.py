@@ -125,10 +125,12 @@ class RemindCommand(Command):
             notify_preview: bool = False
     ) -> None:
         """
-        Display the upcoming subscription renewals in a table format.
+        Display the upcoming subscription renewals in a formatted table.
 
         If notify_preview is True, adds a message about which subscriptions
         would trigger notifications if alerts were enabled.
+
+        Optimized for clean terminal output even with long field values.
         """
         # Show message for notification preview if requested
         if notify_preview:
@@ -155,6 +157,13 @@ class RemindCommand(Command):
         yellow_days_template = f"{YELLOW}{{}} days{RESET}"
         trial_text = f"{CYAN}Trial{RESET}"
 
+        # Define column max widths for clean formatting
+        max_widths = {
+            'name': 30,  # Limit name to 30 characters
+            'payment_method': 20,  # Limit payment method to 20 characters
+            'amount': 15,  # Limit amount display to 15 characters
+        }
+
         # Generate table rows efficiently
         for i, renewal in enumerate(upcoming_renewals):
             # Format days until renewal with colors (optimized with templates)
@@ -180,12 +189,17 @@ class RemindCommand(Command):
             # Format renewal date
             renewal_date = renewal['renewal_date'].strftime('%Y-%m-%d')
 
+            # Truncate long fields with ellipses for better table formatting
+            name = self._truncate_text(renewal['name'], max_widths['name'])
+            payment_method = self._truncate_text(renewal['payment_method'], max_widths['payment_method'])
+            amount = self._truncate_text(amount, max_widths['amount'])
+
             # Add row to table
             table_data[i] = [
-                renewal['name'],
+                name,
                 days_text,
                 status_text,
-                renewal['payment_method'],
+                payment_method,
                 amount,
                 renewal_date
             ]
@@ -198,9 +212,26 @@ class RemindCommand(Command):
         print(f"\n{title}")
         print("=" * len(title))
 
-        # Display table (no change to preserve output format)
+        # Display table with improved formatting
         headers = ["Name", "Renewal In", "Status", "Payment Method", "Amount", "Renewal Date"]
-        print(tabulate(table_data, headers=headers, tablefmt="pretty"))
+
+        # Use tabulate with grid format for better column alignment
+        # maxcolwidths parameter ensures columns don't expand too much
+        # disable_numparse prevents numeric parsing which can affect alignment
+        print(tabulate(
+            table_data,
+            headers=headers,
+            tablefmt="grid",
+            maxcolwidths=[
+                max_widths['name'],
+                None,  # No limit on "Renewal In"
+                None,  # No limit on "Status"
+                max_widths['payment_method'],
+                max_widths['amount'],
+                None  # No limit on "Renewal Date"
+            ],
+            disable_numparse=True
+        ))
 
         # Print summary (using pre-calculated totals)
         print("\nTotal upcoming charges:")
@@ -208,6 +239,48 @@ class RemindCommand(Command):
             print(f"  {currency}: {amount:.2f}")
 
         print(f"\nTip: Use 'project --months 1' to see all renewals for the next month.")
+
+    @staticmethod
+    def _truncate_text(text: str, max_length: int) -> str:
+        """
+        Truncate text to specified maximum length, adding ellipsis if needed.
+        Preserves color codes if present.
+
+        Args:
+            text: The text to truncate
+            max_length: Maximum allowed length
+
+        Returns:
+            Truncated text with ellipsis if needed
+        """
+        if not text:
+            return ""
+
+        # Check for color codes (don't count them in length)
+        has_color = Fore.RED in text or Fore.YELLOW in text or Fore.CYAN in text
+
+        if has_color:
+            # For colored text, we need to handle ANSI escape codes
+            # This is simplified logic, assuming our limited use of color codes
+            visible_length = len(text) - len(Fore.RED) - len(Style.RESET_ALL)
+            if visible_length <= max_length:
+                return text
+
+            # Find reset position to preserve color structure
+            reset_pos = text.find(Style.RESET_ALL)
+            if reset_pos > 0:
+                color_code = text[:text.find(Style.RESET_ALL) - visible_length]
+                visible_text = text[len(color_code):reset_pos]
+                if len(visible_text) > max_length - 3:  # Account for ellipsis
+                    return color_code + visible_text[:max_length - 3] + "..." + Style.RESET_ALL
+
+            # Fallback for complex color structures - return as is
+            return text
+        else:
+            # Simple case: no color codes
+            if len(text) <= max_length:
+                return text
+            return text[:max_length - 3] + "..."
 
     def _build_optimized_filters(
             self,
