@@ -26,6 +26,11 @@ class RemindCommand(Command):
     name = "remind"
     description = "Command for displaying upcoming subscription renewals."
 
+    @staticmethod
+    def _renewal_sort_key(renewal: Dict[str, Any]) -> int:
+        """Key function for sorting renewals by days until renewal."""
+        return renewal['days_until_renewal']
+
     @classmethod
     def register_arguments(cls, parser) -> None:
         """Configure the argument parser for the remind command."""
@@ -89,139 +94,6 @@ class RemindCommand(Command):
             args.days,
             filter_description
         )
-
-    def _build_optimized_filters(
-            self,
-            args: argparse.Namespace,
-            today: datetime.date,
-            end_date: datetime.date
-    ) -> Dict[str, Any]:
-        """
-        Build an optimized filters dictionary that includes date range filtering.
-
-        Optimization: Add renewal date range to database query to minimize
-        the number of subscription objects that need to be processed in memory.
-        """
-        filters = {
-            "status": ["active", "trial"],  # Always filter by active/trial status
-            "renewal_date_range": (today, end_date)  # Filter by renewal date range
-        }
-
-        # Add tag filter if specified (no change)
-        if args.tags:
-            filters["tag"] = args.tags
-
-        # Add payment method filter if specified (no change)
-        if args.payment_methods:
-            filters["payment_methods"] = args.payment_methods
-
-        return filters
-
-    def _build_filter_description(self, args: argparse.Namespace) -> str:
-        """Build a description of the filters being applied."""
-        # This function remains unchanged as it's used for display purposes only
-        filter_parts = []
-
-        # Add tag filter description
-        if hasattr(args, 'tags') and args.tags:
-            if len(args.tags) == 1:
-                filter_parts.append(f"tag '{args.tags[0]}'")
-            else:
-                tags_str = "', '".join(args.tags)
-                filter_parts.append(f"tags ('{tags_str}')")
-
-        # Add payment method filter description
-        if hasattr(args, 'payment_methods') and args.payment_methods:
-            if len(args.payment_methods) == 1:
-                filter_parts.append(f"payment method '{args.payment_methods[0]}'")
-            else:
-                pm_str = "', '".join(args.payment_methods)
-                filter_parts.append(f"payment methods ('{pm_str}')")
-
-        # Combine filter descriptions with AND logic
-        if filter_parts:
-            return " AND ".join(filter_parts)
-        return ""
-
-    def _process_subscriptions(
-            self,
-            subscriptions: List[Subscription],
-            today: datetime.date,
-            filter_description: str
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
-        """
-        Process subscription data for display, optimized for performance.
-
-        Returns both the subscription data and currency totals to avoid
-        multiple iterations over the data.
-
-        Optimizations:
-        1. Uses a single pass through subscriptions for better performance
-        2. Calculates currency totals during the same loop
-        3. Pre-allocates collections to minimize memory overhead
-        4. Combines renewal date checking and days calculation
-        """
-        # Pre-allocate collections to avoid resizing
-        upcoming_renewals = []
-        totals_by_currency = {}
-
-        # Optimize: Compute frequently used values once outside the loop
-        status_trial = 'trial'  # String constants used in comparisons
-
-        # Process each subscription (should be pre-filtered by DB query)
-        for subscription in subscriptions:
-            # Optimization: Access object attributes directly once
-            renewal_date = parse_date(subscription.renewal_date).date()
-
-            # Skip if there's no renewal date (safety check)
-            if not renewal_date:
-                continue
-
-            # Calculate days until renewal
-            days_until_renewal = (renewal_date - today).days
-
-            # Access all required attributes once to minimize lookups
-            name = subscription.name
-            status = subscription.status
-            payment_method = subscription.payment_method
-            amount = subscription.cost
-            currency = subscription.currency
-            tags = getattr(subscription, 'tags', [])
-
-            # Create a dictionary with only the required information
-            # Optimization: Only create the necessary fields
-            renewal_info = {
-                'name': name,
-                'days_until_renewal': days_until_renewal,
-                'status': status,
-                'payment_method': payment_method,
-                'amount': amount,
-                'currency': currency,
-                'renewal_date': renewal_date
-            }
-
-            # Add to result collection
-            upcoming_renewals.append(renewal_info)
-
-            # Update currency totals in the same pass
-            # Optimization: Avoid float conversion multiple times
-            amount_float = float(amount)
-            if currency in totals_by_currency:
-                totals_by_currency[currency] += amount_float
-            else:
-                totals_by_currency[currency] = amount_float
-
-        # Sort renewals by days until renewal (ascending)
-        # Optimization: Use key function without lambda for slightly better performance
-        upcoming_renewals.sort(key=self._renewal_sort_key)
-
-        return upcoming_renewals, totals_by_currency
-
-    # Optimization: Define sort key function separately to avoid lambda creation in hot loops
-    @staticmethod
-    def _renewal_sort_key(renewal: Dict[str, Any]) -> int:
-        """Key function for sorting renewals by days until renewal."""
-        return renewal['days_until_renewal']
 
     def _display_renewals(
             self,
@@ -305,3 +177,238 @@ class RemindCommand(Command):
             print(f"  {currency}: {amount:.2f}")
 
         print(f"\nTip: Use 'project --months 1' to see all renewals for the next month.")
+
+    def _build_optimized_filters(
+            self,
+            args: argparse.Namespace,
+            today: datetime.date,
+            end_date: datetime.date
+    ) -> Dict[str, Any]:
+        """
+        Build an optimized filters dictionary that includes date range filtering.
+
+        Optimization: Add renewal date range to database query to minimize
+        the number of subscription objects that need to be processed in memory.
+
+        Note: Trial subscriptions require special handling in _process_subscriptions,
+        but we still filter at the database level using renewal_date_range.
+        """
+        filters = {
+            "status": ["active", "trial"],  # Always filter by active/trial status
+            "renewal_date_range": (today, end_date)  # Filter by renewal date range
+        }
+
+        # Add tag filter if specified (no change)
+        if args.tags:
+            filters["tag"] = args.tags
+
+        # Add payment method filter if specified (no change)
+        if args.payment_methods:
+            filters["payment_methods"] = args.payment_methods
+
+        # Note: For trial subscriptions, we'll do additional filtering in the
+        # _process_subscriptions method to check if they're still in the trial period.
+        # Database query only filters on renewal_date, but we'll need to compare
+        # that with the calculated trial end date for each subscription.
+
+        return filters
+
+    def _build_filter_description(self, args: argparse.Namespace) -> str:
+        """Build a description of the filters being applied."""
+        # This function remains unchanged as it's used for display purposes only
+        filter_parts = []
+
+        # Add tag filter description
+        if hasattr(args, 'tags') and args.tags:
+            if len(args.tags) == 1:
+                filter_parts.append(f"tag '{args.tags[0]}'")
+            else:
+                tags_str = "', '".join(args.tags)
+                filter_parts.append(f"tags ('{tags_str}')")
+
+        # Add payment method filter description
+        if hasattr(args, 'payment_methods') and args.payment_methods:
+            if len(args.payment_methods) == 1:
+                filter_parts.append(f"payment method '{args.payment_methods[0]}'")
+            else:
+                pm_str = "', '".join(args.payment_methods)
+                filter_parts.append(f"payment methods ('{pm_str}')")
+
+        # Combine filter descriptions with AND logic
+        if filter_parts:
+            return " AND ".join(filter_parts)
+        return ""
+
+    def _process_subscriptions(
+            self,
+            subscriptions: List[Subscription],
+            today: datetime.date,
+            filter_description: str
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+        """
+        Process subscription data for display, optimized for performance.
+
+        Returns both the subscription data and currency totals to avoid
+        multiple iterations over the data.
+
+        Optimizations:
+        1. Uses a single pass through subscriptions for better performance
+        2. Calculates currency totals during the same loop
+        3. Pre-allocates collections to minimize memory overhead
+        4. Combines renewal date checking and days calculation
+        """
+        # Pre-allocate collections to avoid resizing
+        upcoming_renewals = []
+        totals_by_currency = {}
+
+        # Optimize: Compute frequently used values once outside the loop
+        status_trial = 'trial'  # String constants used in comparisons
+
+        # Process each subscription (should be pre-filtered by DB query)
+        for subscription in subscriptions:
+            # First check if it's a trial subscription - special handling required
+            status = subscription.status
+
+            # Optimization: Access all required attributes once to minimize lookups
+            name = subscription.name
+            payment_method = subscription.payment_method
+            amount = subscription.cost
+            currency = subscription.currency
+            renewal_date = parse_date(subscription.renewal_date).date()
+            billing_cycle = subscription.billing_cycle
+            start_date = getattr(subscription, 'start_date', None)
+            tags = getattr(subscription, 'tags', [])
+            if start_date:
+                start_date = parse_date(start_date).date()
+
+            # Skip if there's no renewal date (safety check)
+            if not renewal_date:
+                continue
+
+            # Special handling for trial subscriptions
+            if status == status_trial:
+                # Determine if the subscription is still in trial period
+                if not start_date:
+                    # If no start_date, we can't determine trial status - use renewal date as fallback
+                    trial_end_date = renewal_date
+                else:
+                    # Calculate trial end date based on billing cycle
+                    trial_end_date = self._calculate_trial_end_date(start_date, billing_cycle)
+
+                # If trial has ended, check if its next paid renewal is within window
+                if today > trial_end_date:
+                    # The trial has already ended, but this subscription is still marked as trial
+                    # Skip it unless the renewal_date (first paid period) is still within our window
+                    # (The renewal_date should already be filtered by the DB query)
+                    pass
+                # else: trial is still active, keep it (if renewal_date is within window)
+
+            # Calculate days until renewal
+            days_until_renewal = (renewal_date - today).days
+
+            # Create a dictionary with only the required information
+            # Optimization: Only create the necessary fields
+            renewal_info = {
+                'name': name,
+                'days_until_renewal': days_until_renewal,
+                'status': status,
+                'payment_method': payment_method,
+                'amount': amount,
+                'currency': currency,
+                'renewal_date': renewal_date
+            }
+
+            # Add to result collection
+            upcoming_renewals.append(renewal_info)
+
+            # Update currency totals in the same pass
+            # Optimization: Avoid float conversion multiple times
+            amount_float = float(amount)
+            if currency in totals_by_currency:
+                totals_by_currency[currency] += amount_float
+            else:
+                totals_by_currency[currency] = amount_float
+
+        # Sort renewals by days until renewal (ascending)
+        # Optimization: Use key function without lambda for slightly better performance
+        upcoming_renewals.sort(key=self._renewal_sort_key)
+
+        return upcoming_renewals, totals_by_currency
+
+    def _calculate_trial_end_date(
+            self,
+            start_date: datetime.date,
+            billing_cycle: str
+    ) -> datetime.date:
+        """
+        Calculate when a trial period ends based on start date and billing cycle.
+        For trials, this is typically one billing period from the start date.
+        """
+        # Trial period is typically one billing cycle
+        if billing_cycle.lower() == 'monthly':
+            # Add 1 month to start_date
+            month = start_date.month + 1
+            year = start_date.year
+
+            if month > 12:
+                month = 1
+                year += 1
+
+            # Handle months with different lengths
+            day = min(start_date.day, self._days_in_month(year, month))
+            return datetime.date(year, month, day)
+
+        elif billing_cycle.lower() == 'yearly':
+            # Add 1 year to start_date
+            try:
+                return datetime.date(
+                    start_date.year + 1,
+                    start_date.month,
+                    start_date.day
+                )
+            except ValueError:  # Handle February 29th in leap years
+                return datetime.date(
+                    start_date.year + 1,
+                    start_date.month,
+                    28  # Default to Feb 28th
+                )
+
+        elif billing_cycle.lower() == 'weekly':
+            # Add 7 days
+            return start_date + datetime.timedelta(days=7)
+
+        elif billing_cycle.lower() == 'quarterly':
+            # Add 3 months
+            month = start_date.month + 3
+            year = start_date.year
+
+            if month > 12:
+                month = month - 12
+                year += 1
+
+            # Handle months with different lengths
+            day = min(start_date.day, self._days_in_month(year, month))
+            return datetime.date(year, month, day)
+
+        elif billing_cycle.lower() in ['biannual', 'semi-annual']:
+            # Add 6 months
+            month = start_date.month + 6
+            year = start_date.year
+
+            if month > 12:
+                month = month - 12
+                year += 1
+
+            # Handle months with different lengths
+            day = min(start_date.day, self._days_in_month(year, month))
+            return datetime.date(year, month, day)
+
+        else:
+            # Default to monthly if cycle is unknown
+            return self._calculate_trial_end_date(start_date, 'monthly')
+
+    @staticmethod
+    def _days_in_month(year: int, month: int) -> int:
+        """Helper function to get the number of days in a month."""
+        import calendar
+        return calendar.monthrange(year, month)[1]
