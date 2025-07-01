@@ -241,6 +241,62 @@ class RemindCommand(Command):
 
         print(f"\nTip: Use 'project --months 1' to see all renewals for the next month.")
 
+    def _get_upcoming_renewals(
+            self,
+            subscriptions: List[Subscription],
+            start_date: datetime.date,
+            end_date: datetime.date
+    ) -> List[dict]:
+        """
+        Filter subscriptions to include only those with renewals in the specified window.
+        Returns a list of dictionaries with subscription info and days until renewal.
+
+        Optimized to filter by status first, then check renewal dates.
+        """
+        upcoming_renewals = []
+        valid_statuses = {'active', 'trial'}  # Using set for O(1) lookups
+
+        for subscription in subscriptions:
+            # OPTIMIZATION: Validate and normalize status as the first check
+            # This immediately skips subscriptions that don't match our criteria
+            status = getattr(subscription, 'status', None)
+
+            # Skip if status is None, empty, canceled, or not in valid statuses
+            # This ensures we only process subscriptions we care about
+            if not status or status == 'canceled' or status.lower() not in valid_statuses:
+                continue
+
+            # At this point, we know we have a valid subscription status
+            # Now check if the renewal date is within our window
+            renewal_date = parse_date(subscription.renewal_date).date()
+
+            # OPTIMIZATION: Skip subscriptions without a valid renewal date
+            if not renewal_date:
+                continue
+
+            # Check if renewal is within the specified window
+            if start_date <= renewal_date <= end_date:
+                # Calculate days until renewal
+                days_until_renewal = (renewal_date - start_date).days
+
+                # Create a dictionary with the required information
+                renewal_info = {
+                    'name': subscription.name,
+                    'days_until_renewal': days_until_renewal,
+                    'status': status,  # Use the already validated status
+                    'payment_method': subscription.payment_method,
+                    'amount': subscription.cost,
+                    'currency': subscription.currency,
+                    'renewal_date': renewal_date
+                }
+
+                upcoming_renewals.append(renewal_info)
+
+        # Sort renewals by days until renewal (ascending)
+        upcoming_renewals.sort(key=lambda x: x['days_until_renewal'])
+
+        return upcoming_renewals
+
     @staticmethod
     def _truncate_text(text: str, max_length: int) -> str:
         """
