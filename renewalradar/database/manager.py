@@ -6,6 +6,8 @@ Provides connection management and database operations.
 import sqlite3
 import datetime
 from pathlib import Path
+from typing import Optional, List, Dict, Any
+
 from .schema import get_db_path, initialize_db
 from ..models.subscription import Subscription
 
@@ -515,3 +517,84 @@ class DatabaseManager:
                 costs_by_currency[f"{currency}_details"] = subscription_details.get(currency, [])
 
             return costs_by_currency
+
+    def delete_subscription_by_name(self, subscription_name: str) -> bool:
+        """
+        Delete a subscription by its name.
+
+        Args:
+            subscription_name: The name of the subscription to delete.
+
+        Returns:
+            True if the deletion was successful, False otherwise.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM subscriptions WHERE name = ?",
+                    (subscription_name,)
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            print(f"Error in delete_subscription_by_name: {e}")
+            return False
+
+    def delete_subscription_by_id(self, subscription_id: int) -> bool:
+        """
+        Delete a subscription by its ID.
+
+        Args:
+            subscription_id: The ID of the subscription to delete.
+
+        Returns:
+            True if the deletion was successful, False otherwise.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM subscriptions WHERE id = ?",
+                    (subscription_id,)
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            print(f"Error in delete_subscription_by_id: {e}")
+            return False
+
+    def get_subscriptions(self, subscription_id: Optional[int] = None, name: Optional[str] = None, **kwargs) -> List[
+        Dict[str, Any]]:
+        """
+        Get subscriptions with optional filtering.
+
+        Args:
+            subscription_id: Optional ID to filter by
+            name: Optional name to filter by
+            **kwargs: Additional filters
+
+        Returns:
+            List of subscription dictionaries
+        """
+        query = "SELECT * FROM subscriptions WHERE 1=1"
+        params = []
+
+        if subscription_id is not None:
+            query += " AND id = ?"
+            params.append(subscription_id)
+
+        if name is not None:
+            query += " AND name = ?"
+            params.append(name)
+
+        # Handle other filters...
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            print(f"Error in get_subscriptions: {e}")
+            return []
