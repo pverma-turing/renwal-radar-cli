@@ -72,12 +72,22 @@ class RemindCommand(Command):
             action="store_true",
             help="Preview what subscriptions would trigger notifications if alerts were enabled"
         )
+        parser.add_argument(
+            "--limit",
+            type=int,
+            help="Limit the number of results shown (displays all if not specified)"
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Handle the remind command."""
         # Validate input
         if args.days <= 0:
             print("Error: The number of days must be greater than zero.")
+            return
+
+        # Validate limit if provided
+        if args.limit is not None and args.limit <= 0:
+            print("Error: The limit must be greater than zero.")
             return
 
         # Get current date and calculate end date once
@@ -113,7 +123,8 @@ class RemindCommand(Command):
             totals_by_currency,
             args.days,
             filter_description,
-            notify_preview=args.notify_preview
+            notify_preview=args.notify_preview,
+            limit = args.limit
         )
 
     def _display_renewals(
@@ -122,7 +133,8 @@ class RemindCommand(Command):
             totals_by_currency: Dict[str, float],
             days_window: int,
             filter_description: Optional[str] = None,
-            notify_preview: bool = False
+            notify_preview: bool = False,
+            limit: int = None
     ) -> None:
         """
         Display the upcoming subscription renewals in a formatted table.
@@ -204,6 +216,18 @@ class RemindCommand(Command):
                 amount,
                 renewal_date
             ]
+        # Apply limit if specified (after all filtering and sorting is complete)
+        total_renewals = len(table_data)
+        if limit is not None and limit < total_renewals:
+            table_data = table_data[:limit]
+            limit_applied = True
+        else:
+            limit_applied = False
+
+        # Add note about limited results if applicable
+        if limit_applied:
+            print(
+                f"\nNote: Showing {limit} of {total_renewals} upcoming renewals. Use --limit with a higher value to see more.")
 
         # Print title
         title = f"Upcoming Subscription Renewals (Next {days_window} Days)"
