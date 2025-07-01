@@ -26,10 +26,25 @@ class RemindCommand(Command):
     name = "remind"
     description = "Command for displaying upcoming subscription renewals."
 
+    # Optimization: Define sort key function separately to avoid lambda creation in hot loops
     @staticmethod
-    def _renewal_sort_key(renewal: Dict[str, Any]) -> int:
-        """Key function for sorting renewals by days until renewal."""
-        return renewal['days_until_renewal']
+    def _renewal_sort_key(renewal: Dict[str, Any]) -> tuple:
+        """
+        Key function for sorting renewals by days until renewal.
+
+        Returns a tuple for consistent sorting:
+        1. Primary sort: days until renewal (ascending)
+        2. Secondary sort: subscription name (ascending alphabetically)
+
+        This ensures:
+        - Subscriptions are strictly ordered by how soon they renew
+        - Subscriptions with the same renewal date appear together
+        - Consistent ordering when multiple subscriptions renew on the same date
+        """
+        return (
+            renewal['days_until_renewal'],  # Primary sort: days until renewal
+            renewal['name'].lower()  # Secondary sort: name (case-insensitive)
+        )
 
     @classmethod
     def register_arguments(cls, parser) -> None:
@@ -272,6 +287,7 @@ class RemindCommand(Command):
         2. Calculates currency totals during the same loop
         3. Pre-allocates collections to minimize memory overhead
         4. Combines renewal date checking and days calculation
+        5. Sorts results consistently by days until renewal, then by name
         """
         # Pre-allocate collections to avoid resizing
         upcoming_renewals = []
@@ -345,8 +361,9 @@ class RemindCommand(Command):
             else:
                 totals_by_currency[currency] = amount_float
 
-        # Sort renewals by days until renewal (ascending)
+        # Sort renewals by days until renewal (primary) and name (secondary)
         # Optimization: Use key function without lambda for slightly better performance
+        # The sort is stable, which means items with the same key will maintain relative ordering
         upcoming_renewals.sort(key=self._renewal_sort_key)
 
         return upcoming_renewals, totals_by_currency
