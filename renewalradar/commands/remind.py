@@ -7,7 +7,7 @@ displays upcoming subscription renewals within a specified number of days.
 
 import argparse
 import datetime
-from typing import List
+from typing import List, Dict, Any, Optional
 
 from tabulate import tabulate
 
@@ -35,6 +35,18 @@ class RemindCommand(Command):
             default=7,
             help="Show renewals due within this many days (default: 7)"
         )
+        parser.add_argument(
+            "--tag",
+            action="append",
+            dest="tags",
+            help="Filter by tag (can be used multiple times, combined with OR logic)"
+        )
+        parser.add_argument(
+            "--payment-method",
+            action="append",
+            dest="payment_methods",
+            help="Filter by payment method (can be used multiple times, combined with OR logic)"
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Handle the remind command."""
@@ -49,41 +61,89 @@ class RemindCommand(Command):
         # Calculate the end date for the reminder window
         end_date = today + datetime.timedelta(days=args.days)
 
-        # Get all active or trial subscriptions
+        # Build filters dictionary
+        filters = {
+            "status": ["active", "trial"]  # Always filter by active/trial status
+        }
+
+        # Add tag filter if specified
+        if args.tags:
+            filters["tag"] = args.tags
+
+        # Add payment method filter if specified
+        if args.payment_methods:
+            filters["payment_methods"] = args.payment_methods
+
+        # Build filter description for output
+        filter_description = self._build_filter_description(args)
+
+        # Get filtered subscriptions
         db_manager = DatabaseManager()
-        subscriptions = db_manager.get_filtered_subscriptions(
-            {'status': ["active", "trial"]}
-        )
+        subscriptions = db_manager.get_filtered_subscriptions(filters)
 
         if not subscriptions:
-            print("No active or trial subscriptions found.")
+            if filter_description:
+                print(f"No subscriptions found matching the filters: {filter_description}.")
+            else:
+                print("No active or trial subscriptions found.")
             return
 
         # Filter subscriptions for those with renewals within the specified window
         upcoming_renewals = self._get_upcoming_renewals(subscriptions, today, end_date)
 
         # Display the renewals
-        self._display_renewals(upcoming_renewals, today, end_date, args.days)
+        self._display_renewals(upcoming_renewals, today, end_date, args.days, filter_description)
+
+    def _build_filter_description(self, args: argparse.Namespace) -> str:
+        """Build a description of the filters being applied."""
+        filter_parts = []
+
+        # Add tag filter description
+        if hasattr(args, 'tags') and args.tags:
+            if len(args.tags) == 1:
+                filter_parts.append(f"tag '{args.tags[0]}'")
+            else:
+                tags_str = "', '".join(args.tags)
+                filter_parts.append(f"tags ('{tags_str}')")
+
+        # Add payment method filter description
+        if hasattr(args, 'payment_methods') and args.payment_methods:
+            if len(args.payment_methods) == 1:
+                filter_parts.append(f"payment method '{args.payment_methods[0]}'")
+            else:
+                pm_str = "', '".join(args.payment_methods)
+                filter_parts.append(f"payment methods ('{pm_str}')")
+
+        # Combine filter descriptions with AND logic
+        if filter_parts:
+            return " AND ".join(filter_parts)
+        return ""
 
     def _get_upcoming_renewals(
             self,
             subscriptions: List[Subscription],
             start_date: datetime.date,
             end_date: datetime.date
-    ) -> List[dict]:
+    ) -> List[Dict[str, Any]]:
         """
         Filter subscriptions to include only those with renewals in the specified window.
         Returns a list of dictionaries with subscription info and days until renewal.
+
+        Note: Filtering by tag and payment method is already applied at this point.
         """
         upcoming_renewals = []
 
         for subscription in subscriptions:
-            # Skip canceled subscriptions
+            # Skip canceled subscriptions (though they should already be filtered out)
             if hasattr(subscription, 'status') and subscription.status == 'canceled':
                 continue
 
             # Calculate next renewal date (could be in the past if subscription is overdue)
             renewal_date = parse_date(subscription.renewal_date).date()
+
+            # Skip subscriptions without a renewal date
+            if not renewal_date:
+                continue
 
             # Check if renewal is within the specified window
             if start_date <= renewal_date <= end_date:
@@ -98,7 +158,8 @@ class RemindCommand(Command):
                     'payment_method': subscription.payment_method,
                     'amount': subscription.cost,
                     'currency': subscription.currency,
-                    'renewal_date': renewal_date
+                    'renewal_date': renewal_date,
+                    'tags': subscription.tags if hasattr(subscription, 'tags') else []
                 }
 
                 upcoming_renewals.append(renewal_info)
@@ -110,14 +171,16 @@ class RemindCommand(Command):
 
     def _display_renewals(
             self,
-            upcoming_renewals: List[dict],
+            upcoming_renewals: List[Dict[str, Any]],
             today: datetime.date,
             end_date: datetime.date,
-            days_window: int
+            days_window: int,
+            filter_description: Optional[str] = None
     ) -> None:
         """Display the upcoming subscription renewals in a table format."""
         if not upcoming_renewals:
-            print(f"No upcoming renewals in the next {days_window} days.")
+            filter_msg = f" matching {filter_description}" if filter_description else ""
+            print(f"No upcoming renewals{filter_msg} in the next {days_window} days.")
             return
 
         # Create table rows
@@ -163,8 +226,12 @@ class RemindCommand(Command):
             table_data.append(row)
 
         # Print title
-        print(f"\nUpcoming Subscription Renewals (Next {days_window} Days)")
-        print("=" * 60)
+        title = f"Upcoming Subscription Renewals (Next {days_window} Days)"
+        if filter_description:
+            title += f" - Filtered by: {filter_description}"
+
+        print(f"\n{title}")
+        print("=" * len(title))
 
         # Display table
         headers = ["Name", "Renewal In", "Status", "Payment Method", "Amount", "Renewal Date"]
