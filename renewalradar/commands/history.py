@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from datetime import datetime
 from tabulate import tabulate
 from .base import Command
@@ -54,6 +55,20 @@ class HistoryCommand(Command):
         Returns:
             int: 0 on success, non-zero on failure
         """
+        # Validate action parameter
+        if args.action and args.action not in ["add", "update", "delete"]:
+            print(f"Invalid value for --action. Must be one of: add, update, delete")
+            return 1
+
+        # Validate limit parameter
+        if args.limit is not None:
+            if args.limit < 0:
+                print(f"Limit must be a positive number")
+                return 1
+            elif args.limit == 0:
+                print("No history records to display (limit set to 0)")
+                return 0
+
         # Validate the since date format if provided
         since_date = None
         if args.since:
@@ -65,9 +80,12 @@ class HistoryCommand(Command):
                 print("Invalid date format for --since. Please use YYYY-MM-DD.")
                 return 1
 
-        db_manager = DatabaseManager()
-        conn = db_manager.get_connection()
+
+        conn = None
         try:
+            db_manager = DatabaseManager()
+            conn = db_manager.get_connection()
+
             # Build the query based on provided filters
             query = "SELECT timestamp, action, subscription_name, changed_fields FROM change_log"
             params = []
@@ -174,8 +192,12 @@ class HistoryCommand(Command):
             print(f"\nTotal entries shown: {len(rows)}{limit_message}")
             return 0
 
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+            return 1
         except Exception as e:
             print(f"Error retrieving change history: {e}")
             return 1
         finally:
-            conn.close()
+            if conn:
+                conn.close()
