@@ -22,7 +22,17 @@ class HistoryCommand(Command):
         Args:
             parser: The ArgumentParser object to add arguments to
         """
-        pass  # No additional arguments for the basic implementation
+        parser.add_argument(
+            "--name",
+            type=str,
+            help="Filter history by subscription name (exact match)"
+        )
+        parser.add_argument(
+            "--action",
+            type=str,
+            choices=["add", "update", "delete"],
+            help="Filter history by action type (add, update, or delete)"
+        )
 
     def execute(self, args):
         """
@@ -37,16 +47,45 @@ class HistoryCommand(Command):
         db_manager = DatabaseManager()
         conn = db_manager.get_connection()
         try:
-            # Query the change_log table in descending order of timestamp
-            cursor = conn.execute(
-                "SELECT timestamp, action, subscription_name, changed_fields FROM change_log ORDER BY timestamp DESC"
-            )
+            # Build the query based on provided filters
+            query = "SELECT timestamp, action, subscription_name, changed_fields FROM change_log"
+            params = []
+            conditions = []
+
+            # Apply name filter if provided
+            if args.name:
+                conditions.append("subscription_name = ?")
+                params.append(args.name)
+
+            # Apply action filter if provided
+            if args.action:
+                conditions.append("action = ?")
+                params.append(args.action)
+
+            # Add WHERE clause if we have conditions
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+
+            # Always order by timestamp descending
+            query += " ORDER BY timestamp DESC"
+
+            # Execute the query with parameters
+            cursor = conn.execute(query, params)
 
             # Fetch all rows
             rows = cursor.fetchall()
 
+            # Determine the filter description for output
+            filter_description = ""
+            if args.name and args.action:
+                filter_description = f" for '{args.name}' with action '{args.action.upper()}'"
+            elif args.name:
+                filter_description = f" for '{args.name}'"
+            elif args.action:
+                filter_description = f" with action '{args.action.upper()}'"
+
             if not rows:
-                print("No change history found.")
+                print(f"No change history found{filter_description}.")
                 return 0
 
             # Format data for tabulate
@@ -88,7 +127,7 @@ class HistoryCommand(Command):
                 tablefmt="pretty"
             )
 
-            print(f"\nSubscription Change History:\n")
+            print(f"\nSubscription Change History{filter_description}:\n")
             print(table)
 
             print(f"\nTotal entries: {len(rows)}")
