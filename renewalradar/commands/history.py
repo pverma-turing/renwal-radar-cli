@@ -62,6 +62,8 @@ class HistoryCommand(Command):
         Returns:
             int: 0 on success, non-zero on failure
         """
+        # Early validation to prevent unnecessary DB queries
+
         # Validate action parameter
         if args.action and args.action not in ["add", "update", "delete"]:
             print(f"Invalid value for --action. Must be one of: add, update, delete")
@@ -73,6 +75,7 @@ class HistoryCommand(Command):
                 print(f"Limit must be a positive number")
                 return 1
             elif args.limit == 0:
+                # Exit early when limit is set to 0, regardless of other filters
                 print("No history records to display (limit set to 0)")
                 return 0
 
@@ -108,7 +111,6 @@ class HistoryCommand(Command):
                 params.append(args.action.lower())
 
             # Apply since date filter if provided and valid
-            # FIX: Use a more reliable approach for timestamp comparison in SQLite
             if since_date:
                 # SQLite timestamp comparison - this ensures we're comparing the date portion correctly
                 conditions.append("strftime('%Y-%m-%d', timestamp) >= ?")
@@ -126,14 +128,10 @@ class HistoryCommand(Command):
                 query += " LIMIT ?"
                 params.append(args.limit)
 
-            # Debug output to diagnose filter issues - can be removed in production
-            # print(f"DEBUG: Executing query: {query}")
-            # print(f"DEBUG: Parameters: {params}")
-
             # Execute the query with parameters
             cursor = conn.execute(query, params)
 
-            # Get all rows first to check if results exist and get accurate count
+            # Get all rows to check if results exist and get accurate count
             all_rows = cursor.fetchall()
 
             if not all_rows:
