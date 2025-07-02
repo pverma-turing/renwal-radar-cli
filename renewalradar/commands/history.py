@@ -87,7 +87,6 @@ class HistoryCommand(Command):
                 print("Invalid date format for --since. Please use YYYY-MM-DD.")
                 return 1
 
-
         conn = None
         try:
             db_manager = DatabaseManager()
@@ -129,10 +128,30 @@ class HistoryCommand(Command):
             # Execute the query with parameters
             cursor = conn.execute(query, params)
 
-            # Fetch all rows
-            rows = cursor.fetchall()
+            # Check if there are any results before processing
+            # This only fetches one row to check if we have results
+            first_row = cursor.fetchone()
+            if not first_row:
+                # Determine the filter description for empty results
+                filter_parts = []
+                if args.name:
+                    filter_parts.append(f"subscription '{args.name}'")
+                if args.action:
+                    filter_parts.append(f"action '{args.action.upper()}'")
+                if since_date:
+                    filter_parts.append(f"since {args.since}")
 
-            # Determine the filter description for output
+                filter_description = ""
+                if filter_parts:
+                    filter_description = " for " + ", ".join(filter_parts)
+
+                print(f"No change history found{filter_description}.")
+                return 0
+
+            # Reset the cursor to include the first row we fetched
+            cursor = conn.execute(query, params)
+
+            # Build filter description for output messages
             filter_parts = []
             if args.name:
                 filter_parts.append(f"subscription '{args.name}'")
@@ -145,81 +164,104 @@ class HistoryCommand(Command):
             if filter_parts:
                 filter_description = " for " + ", ".join(filter_parts)
 
-            if not rows:
-                print(f"No change history found{filter_description}.")
-                return 0
-
-            # Process the results for display or export
-            processed_rows = []
-            for row in rows:
-                timestamp_str, action, name, changed_fields_json = row
-
-                # Parse the timestamp and format it for better readability
-                try:
-                    timestamp = datetime.fromisoformat(timestamp_str)
-                    formatted_timestamp = timestamp.strftime('%Y-%m-%d %H:%M:%S')
-                except ValueError:
-                    # Fallback if timestamp can't be parsed
-                    formatted_timestamp = timestamp_str
-
-                # Parse the JSON string to get a dictionary
-                try:
-                    changed_fields_dict = json.loads(changed_fields_json)
-                    # Format the dictionary for display
-                    changed_fields_formatted = "\n".join(
-                        f"{key}: {value}" for key, value in changed_fields_dict.items()
-                    )
-                except json.JSONDecodeError:
-                    # Fallback if JSON can't be parsed
-                    changed_fields_formatted = changed_fields_json
-
-                # Add the processed row
-                processed_rows.append([
-                    formatted_timestamp,
-                    action.upper(),
-                    name,
-                    changed_fields_formatted
-                ])
-
-            # Handle CSV export if requested
+            # Process output based on format
             if args.format == "csv":
+                # CSV export - stream directly to file
                 output_file = "history_export.csv"
+                row_count = 0
 
                 try:
-                    # Write CSV file with proper handling of encoding and newlines
                     with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
                         csv_writer = csv.writer(csvfile)
 
                         # Write header
                         csv_writer.writerow(["Timestamp", "Action", "Subscription", "Changed Fields"])
 
-                        # Write data rows
-                        for row in processed_rows:
-                            csv_writer.writerow(row)
+                        # Stream rows directly to CSV file
+                        for row in cursor:
+                            timestamp_str, action, name, changed_fields_json = row
 
-                    print(f"Successfully exported {len(processed_rows)} history records to {output_file}")
+                            # Format timestamp
+                            try:
+                                timestamp = datetime.fromisoformat(timestamp_str)
+                                formatted_timestamp = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                            except ValueError:
+                                formatted_timestamp = timestamp_str
+
+                            # Format changed fields
+                            try:
+                                changed_fields_dict = json.loads(changed_fields_json)
+                                changed_fields_formatted = "\n".join(
+                                    f"{key}: {value}" for key, value in changed_fields_dict.items()
+                                )
+                            except json.JSONDecodeError:
+                                changed_fields_formatted = changed_fields_json
+
+                            # Write the row
+                            csv_writer.writerow([
+                                formatted_timestamp,
+                                action.upper(),
+                                name,
+                                changed_fields_formatted
+                            ])
+                            row_count += 1
+
+                    print(f"Successfully exported {row_count} history records to {output_file}")
                     return 0
 
                 except IOError as e:
                     print(f"Error writing to file {output_file}: {e}")
                     return 1
             else:
-                # Default: Display table output
+                # Table output - process rows directly for tabulate
+                # We only need to keep the formatted rows in memory, not the raw data
+                formatted_rows = []
+                row_count = 0
+
+                for row in cursor:
+                    timestamp_str, action, name, changed_fields_json = row
+
+                    # Format timestamp
+                    try:
+                        timestamp = datetime.fromisoformat(timestamp_str)
+                        formatted_timestamp = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        formatted_timestamp = timestamp_str
+
+                    # Format changed fields
+                    try:
+                        changed_fields_dict = json.loads(changed_fields_json)
+                        changed_fields_formatted = "\n".join(
+                            f"{key}: {value}" for key, value in changed_fields_dict.items()
+                        )
+                    except json.JSONDecodeError:
+                        changed_fields_formatted = changed_fields_json
+
+                    # Add to formatted rows
+                    formatted_rows.append([
+                        formatted_timestamp,
+                        action.upper(),
+                        name,
+                        changed_fields_formatted
+                    ])
+                    row_count += 1
+
+                # Generate and display the table
                 table = tabulate(
-                    processed_rows,
+                    formatted_rows,
                     headers=["Timestamp", "Action", "Subscription", "Changed Fields"],
                     tablefmt="pretty"
                 )
 
-                # Show limit in the output message if it's being applied
+                # Show limit message if applicable
                 limit_message = ""
-                if args.limit is not None and args.limit > 0 and len(rows) == args.limit:
+                if args.limit is not None and args.limit > 0 and row_count == args.limit:
                     limit_message = f" (limited to {args.limit})"
 
                 print(f"\nSubscription Change History{filter_description}:\n")
                 print(table)
 
-                print(f"\nTotal entries shown: {len(rows)}{limit_message}")
+                print(f"\nTotal entries shown: {row_count}{limit_message}")
                 return 0
 
         except sqlite3.Error as e:
