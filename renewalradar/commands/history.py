@@ -98,19 +98,20 @@ class HistoryCommand(Command):
             conditions = []
 
             # Apply name filter if provided
-            if args.name:
+            if args.name is not None and args.name.strip():
                 conditions.append("subscription_name = ?")
-                params.append(args.name)
+                params.append(args.name.strip())
 
-            # Apply action filter if provided
-            if args.action:
-                conditions.append("action = ?")
-                params.append(args.action)
+            # Apply action filter if provided - ensure case insensitive matching
+            if args.action is not None:
+                conditions.append("LOWER(action) = LOWER(?)")
+                params.append(args.action.lower())
 
             # Apply since date filter if provided and valid
+            # FIX: Use a more reliable approach for timestamp comparison in SQLite
             if since_date:
-                # This compares the date part of the timestamp
-                conditions.append("date(timestamp) >= date(?)")
+                # SQLite timestamp comparison - this ensures we're comparing the date portion correctly
+                conditions.append("strftime('%Y-%m-%d', timestamp) >= ?")
                 params.append(since_date_str)
 
             # Add WHERE clause if we have conditions
@@ -125,13 +126,17 @@ class HistoryCommand(Command):
                 query += " LIMIT ?"
                 params.append(args.limit)
 
+            # Debug output to diagnose filter issues - can be removed in production
+            # print(f"DEBUG: Executing query: {query}")
+            # print(f"DEBUG: Parameters: {params}")
+
             # Execute the query with parameters
             cursor = conn.execute(query, params)
 
-            # Check if there are any results before processing
-            # This only fetches one row to check if we have results
-            first_row = cursor.fetchone()
-            if not first_row:
+            # Get all rows first to check if results exist and get accurate count
+            all_rows = cursor.fetchall()
+
+            if not all_rows:
                 # Determine the filter description for empty results
                 filter_parts = []
                 if args.name:
@@ -147,9 +152,6 @@ class HistoryCommand(Command):
 
                 print(f"No change history found{filter_description}.")
                 return 0
-
-            # Reset the cursor to include the first row we fetched
-            cursor = conn.execute(query, params)
 
             # Build filter description for output messages
             filter_parts = []
@@ -168,7 +170,6 @@ class HistoryCommand(Command):
             if args.format == "csv":
                 # CSV export - stream directly to file
                 output_file = "history_export.csv"
-                row_count = 0
 
                 try:
                     with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
@@ -178,7 +179,7 @@ class HistoryCommand(Command):
                         csv_writer.writerow(["Timestamp", "Action", "Subscription", "Changed Fields"])
 
                         # Stream rows directly to CSV file
-                        for row in cursor:
+                        for row in all_rows:
                             timestamp_str, action, name, changed_fields_json = row
 
                             # Format timestamp
@@ -204,9 +205,8 @@ class HistoryCommand(Command):
                                 name,
                                 changed_fields_formatted
                             ])
-                            row_count += 1
 
-                    print(f"Successfully exported {row_count} history records to {output_file}")
+                    print(f"Successfully exported {len(all_rows)} history records to {output_file}")
                     return 0
 
                 except IOError as e:
@@ -214,11 +214,9 @@ class HistoryCommand(Command):
                     return 1
             else:
                 # Table output - process rows directly for tabulate
-                # We only need to keep the formatted rows in memory, not the raw data
                 formatted_rows = []
-                row_count = 0
 
-                for row in cursor:
+                for row in all_rows:
                     timestamp_str, action, name, changed_fields_json = row
 
                     # Format timestamp
@@ -244,7 +242,6 @@ class HistoryCommand(Command):
                         name,
                         changed_fields_formatted
                     ])
-                    row_count += 1
 
                 # Generate and display the table
                 table = tabulate(
@@ -255,13 +252,13 @@ class HistoryCommand(Command):
 
                 # Show limit message if applicable
                 limit_message = ""
-                if args.limit is not None and args.limit > 0 and row_count == args.limit:
+                if args.limit is not None and args.limit > 0 and len(all_rows) == args.limit:
                     limit_message = f" (limited to {args.limit})"
 
                 print(f"\nSubscription Change History{filter_description}:\n")
                 print(table)
 
-                print(f"\nTotal entries shown: {row_count}{limit_message}")
+                print(f"\nTotal entries shown: {len(all_rows)}{limit_message}")
                 return 0
 
         except sqlite3.Error as e:
