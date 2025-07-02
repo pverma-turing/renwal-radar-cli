@@ -33,6 +33,11 @@ class HistoryCommand(Command):
             choices=["add", "update", "delete"],
             help="Filter history by action type (add, update, or delete)"
         )
+        parser.add_argument(
+            "--since",
+            type=str,
+            help="Show only entries on or after this date (YYYY-MM-DD)"
+        )
 
     def execute(self, args):
         """
@@ -44,6 +49,17 @@ class HistoryCommand(Command):
         Returns:
             int: 0 on success, non-zero on failure
         """
+        # Validate the since date format if provided
+        since_date = None
+        if args.since:
+            try:
+                since_date = datetime.strptime(args.since, '%Y-%m-%d')
+                # Convert to ISO format date string (just the date part)
+                since_date_str = since_date.strftime('%Y-%m-%d')
+            except ValueError:
+                print("Invalid date format for --since. Please use YYYY-MM-DD.")
+                return 1
+
         db_manager = DatabaseManager()
         conn = db_manager.get_connection()
         try:
@@ -62,6 +78,12 @@ class HistoryCommand(Command):
                 conditions.append("action = ?")
                 params.append(args.action)
 
+            # Apply since date filter if provided and valid
+            if since_date:
+                # This compares the date part of the timestamp
+                conditions.append("date(timestamp) >= date(?)")
+                params.append(since_date_str)
+
             # Add WHERE clause if we have conditions
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
@@ -76,13 +98,17 @@ class HistoryCommand(Command):
             rows = cursor.fetchall()
 
             # Determine the filter description for output
+            filter_parts = []
+            if args.name:
+                filter_parts.append(f"subscription '{args.name}'")
+            if args.action:
+                filter_parts.append(f"action '{args.action.upper()}'")
+            if since_date:
+                filter_parts.append(f"since {args.since}")
+
             filter_description = ""
-            if args.name and args.action:
-                filter_description = f" for '{args.name}' with action '{args.action.upper()}'"
-            elif args.name:
-                filter_description = f" for '{args.name}'"
-            elif args.action:
-                filter_description = f" with action '{args.action.upper()}'"
+            if filter_parts:
+                filter_description = " for " + ", ".join(filter_parts)
 
             if not rows:
                 print(f"No change history found{filter_description}.")
