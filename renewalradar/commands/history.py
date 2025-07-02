@@ -1,3 +1,4 @@
+import csv
 import json
 import sqlite3
 from datetime import datetime
@@ -43,6 +44,12 @@ class HistoryCommand(Command):
             "--limit",
             type=int,
             help="Limit the number of results shown"
+        )
+        parser.add_argument(
+            "--format",
+            type=str,
+            choices=["csv"],
+            help="Export results in the specified format (currently supported: csv)"
         )
 
     def execute(self, args):
@@ -142,8 +149,8 @@ class HistoryCommand(Command):
                 print(f"No change history found{filter_description}.")
                 return 0
 
-            # Format data for tabulate
-            formatted_rows = []
+            # Process the results for display or export
+            processed_rows = []
             for row in rows:
                 timestamp_str, action, name, changed_fields_json = row
 
@@ -166,31 +173,54 @@ class HistoryCommand(Command):
                     # Fallback if JSON can't be parsed
                     changed_fields_formatted = changed_fields_json
 
-                # Create a formatted row
-                formatted_rows.append([
+                # Add the processed row
+                processed_rows.append([
                     formatted_timestamp,
                     action.upper(),
                     name,
                     changed_fields_formatted
                 ])
 
-            # Use tabulate to create a nicely formatted table
-            table = tabulate(
-                formatted_rows,
-                headers=["Timestamp", "Action", "Subscription", "Changed Fields"],
-                tablefmt="pretty"
-            )
+            # Handle CSV export if requested
+            if args.format == "csv":
+                output_file = "history_export.csv"
 
-            # Show limit in the output message if it's being applied
-            limit_message = ""
-            if args.limit is not None and args.limit > 0 and len(rows) == args.limit:
-                limit_message = f" (limited to {args.limit})"
+                try:
+                    # Write CSV file with proper handling of encoding and newlines
+                    with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+                        csv_writer = csv.writer(csvfile)
 
-            print(f"\nSubscription Change History{filter_description}:\n")
-            print(table)
+                        # Write header
+                        csv_writer.writerow(["Timestamp", "Action", "Subscription", "Changed Fields"])
 
-            print(f"\nTotal entries shown: {len(rows)}{limit_message}")
-            return 0
+                        # Write data rows
+                        for row in processed_rows:
+                            csv_writer.writerow(row)
+
+                    print(f"Successfully exported {len(processed_rows)} history records to {output_file}")
+                    return 0
+
+                except IOError as e:
+                    print(f"Error writing to file {output_file}: {e}")
+                    return 1
+            else:
+                # Default: Display table output
+                table = tabulate(
+                    processed_rows,
+                    headers=["Timestamp", "Action", "Subscription", "Changed Fields"],
+                    tablefmt="pretty"
+                )
+
+                # Show limit in the output message if it's being applied
+                limit_message = ""
+                if args.limit is not None and args.limit > 0 and len(rows) == args.limit:
+                    limit_message = f" (limited to {args.limit})"
+
+                print(f"\nSubscription Change History{filter_description}:\n")
+                print(table)
+
+                print(f"\nTotal entries shown: {len(rows)}{limit_message}")
+                return 0
 
         except sqlite3.Error as e:
             print(f"Database error: {e}")
