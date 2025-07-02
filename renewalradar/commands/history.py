@@ -38,6 +38,11 @@ class HistoryCommand(Command):
             type=str,
             help="Show only entries on or after this date (YYYY-MM-DD)"
         )
+        parser.add_argument(
+            "--limit",
+            type=int,
+            help="Limit the number of results shown"
+        )
 
     def execute(self, args):
         """
@@ -90,6 +95,11 @@ class HistoryCommand(Command):
 
             # Always order by timestamp descending
             query += " ORDER BY timestamp DESC"
+
+            # Apply limit if specified
+            if args.limit is not None and args.limit > 0:
+                query += " LIMIT ?"
+                params.append(args.limit)
 
             # Execute the query with parameters
             cursor = conn.execute(query, params)
@@ -153,10 +163,15 @@ class HistoryCommand(Command):
                 tablefmt="pretty"
             )
 
+            # Show limit in the output message if it's being applied
+            limit_message = ""
+            if args.limit is not None and args.limit > 0 and len(rows) == args.limit:
+                limit_message = f" (limited to {args.limit})"
+
             print(f"\nSubscription Change History{filter_description}:\n")
             print(table)
 
-            print(f"\nTotal entries: {len(rows)}")
+            print(f"\nTotal entries shown: {len(rows)}{limit_message}")
             return 0
 
         except Exception as e:
