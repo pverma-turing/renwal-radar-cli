@@ -66,6 +66,16 @@ def initialize_db():
         FOREIGN KEY (parent_subscription_id) REFERENCES subscriptions(id)
     )
     ''')
+    # Add the change_log table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS change_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            action TEXT NOT NULL, 
+            subscription_name TEXT NOT NULL,
+            changed_fields TEXT NOT NULL
+        )
+    ''')
 
     # Create metadata table for schema version tracking
     cursor.execute('''
