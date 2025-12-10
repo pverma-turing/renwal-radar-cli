@@ -32,6 +32,20 @@ def initialize_db():
     # Enable foreign keys
     cursor.execute("PRAGMA foreign_keys = ON")
 
+    # Add budgets table if it doesn't exist
+    cursor.execute('''
+           CREATE TABLE IF NOT EXISTS budgets (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               year INTEGER NOT NULL,
+               month INTEGER NOT NULL,
+               currency TEXT NOT NULL,
+               amount REAL NOT NULL,
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+               UNIQUE(year, month, currency)
+           )
+           ''')
+
     # Create subscriptions table
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS subscriptions (
